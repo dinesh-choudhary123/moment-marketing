@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
 :root {
+  --sidebar-width: 16rem;
   --background: #f8f9fb;
   --foreground: #111827;
   --sidebar: #ffffff;
@@ -11,6 +12,10 @@
   --card: #ffffff;
   --card-border: #e5e7eb;
   --muted: #6b7280;
+}
+
+html[data-sidebar-collapsed="true"] {
+  --sidebar-width: 4rem;
 }
 
 @theme inline {

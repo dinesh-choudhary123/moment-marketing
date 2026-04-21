@@ -66,23 +66,26 @@ function CalendarContent() {
         <div className="max-w-screen-xl mx-auto flex items-center justify-between mb-4">
           {/* Tabs */}
           <div className="flex items-center gap-1 bg-[var(--background)] border border-[var(--card-border)] rounded-xl p-1">
-            {([
-              ['available', `Available Moments (${allEntries.length})`],
-              ['my-calendar', `My Calendar (${allEntries.length})`],
-            ] as const).map(([id, label]) => (
-              <button
-                key={id}
-                onClick={() => setTab(id)}
-                className={cn(
-                  'px-4 py-2 text-sm font-medium rounded-lg transition-all',
-                  tab === id
-                    ? 'bg-[var(--card)] text-[var(--foreground)] shadow-sm border border-[var(--card-border)]'
-                    : 'text-[var(--muted)] hover:text-[var(--foreground)]',
-                )}
-              >
-                {label}
-              </button>
-            ))}
+            <Link
+              href="/moments"
+              className={cn(
+                'px-4 py-2 text-sm font-medium rounded-lg transition-all',
+                'text-[var(--muted)] hover:text-[var(--foreground)]',
+              )}
+            >
+              Moment Marketing
+            </Link>
+            <button
+              onClick={() => setTab('my-calendar')}
+              className={cn(
+                'px-4 py-2 text-sm font-medium rounded-lg transition-all',
+                tab === 'my-calendar'
+                  ? 'bg-[var(--card)] text-[var(--foreground)] shadow-sm border border-[var(--card-border)]'
+                  : 'text-[var(--muted)] hover:text-[var(--foreground)]',
+              )}
+            >
+              My Calendar ({allEntries.length})
+            </button>
           </div>
 
           <div className="flex items-center gap-3">
@@ -164,7 +167,7 @@ function CalendarContent() {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-[var(--card-border)] bg-[var(--background)]">
-                  {['DATE', 'DAY', 'MOMENT NAME', 'TYPE', 'OWNERSHIP', 'CREATIVE BUDGET', 'MEDIA BUDGET', 'BENCHMARKING', 'ACTIONS'].map(h => (
+                  {['DATE', 'MONTH', 'MOMENT NAME', 'TYPE', 'OWNERSHIP', 'CREATIVE BUDGET', 'MEDIA BUDGET', 'BENCHMARKING', 'ACTIONS'].map(h => (
                     <th key={h} className="py-3 px-3 text-left text-[10px] font-bold uppercase tracking-widest text-[var(--muted)] first:pl-4 last:pr-4">
                       {h}
                     </th>

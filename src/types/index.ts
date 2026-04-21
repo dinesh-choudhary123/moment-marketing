@@ -34,6 +34,7 @@ export interface Moment {
   isCustom: boolean;
   createdAt: string;
   tags: string[];
+  context?: string;
 }
 
 export interface CalendarEntry {

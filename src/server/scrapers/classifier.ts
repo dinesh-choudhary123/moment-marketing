@@ -10,6 +10,8 @@ interface RawTrend {
   platform: Platform;
   url?: string;
   volume?: number;
+  /** ISO timestamp of the original post / trend origin. If omitted, today is used. */
+  originDate?: string;
 }
 
 // ─── Brand safety — topics to EXCLUDE from marketing moments ────────────────
@@ -331,6 +333,26 @@ export function classifyTrend(raw: RawTrend): Moment | null {
   const finalScore = Math.min(100, raw.trendingScore + commercialBoost);
   const tags = extractTags(raw.name, description, category);
 
+  // Normalize originDate → valid ISO string. Handles:
+  //   • ISO strings ("2026-04-21T10:00:00Z")
+  //   • RFC 2822 / RSS ("Mon, 21 Apr 2026 14:30:00 +0000")
+  //   • Unix seconds or ms as number / numeric string
+  //   • Plain "YYYY-MM-DD"
+  // Falls back to now if unparseable so UI never shows "Invalid Date".
+  const normalizedOriginIso = (() => {
+    const raw0 = raw.originDate;
+    if (!raw0) return new Date().toISOString();
+    // numeric (epoch) — seconds if <1e12, ms otherwise
+    if (typeof raw0 === 'number' || /^\d+$/.test(String(raw0))) {
+      const n = Number(raw0);
+      const ms = n < 1e12 ? n * 1000 : n;
+      const d = new Date(ms);
+      return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+    }
+    const d = new Date(String(raw0));
+    return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+  })();
+
   // GUARANTEED IMAGE: Every moment must have a visual.
   // Local paths (/images/ig/*, /api/image-proxy*) are always trusted.
   // External URLs from known-blocked CDNs get replaced with Unsplash fallbacks.
@@ -352,9 +374,9 @@ export function classifyTrend(raw: RawTrend): Moment | null {
     platforms: [raw.platform],
     imageUrl,
     trendingScore: finalScore,
-    date: new Date().toISOString().split('T')[0],
+    date: normalizedOriginIso.slice(0, 10),
     isCustom: false,
-    createdAt: new Date().toISOString(),
+    createdAt: normalizedOriginIso,
     tags,
   };
 }

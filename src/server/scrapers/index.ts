@@ -1,5 +1,6 @@
 import type { Moment, Platform } from '@/types';
 import { momentsStore, scraperStatus } from '@/server/db/store';
+import { formatSpendSummary } from '@/server/db/apify-spend';
 import { fetchTwitterTrends } from './twitter';
 import { fetchYouTubeTrends } from './youtube';
 import { fetchRedditTrends } from './reddit';
@@ -7,8 +8,8 @@ import { fetchInstagramTrends } from './instagram';
 import { fetchFacebookTrends } from './facebook';
 import { fetchGoogleTrends } from './google';
 
-// 30-minute cooldown between manual refreshes
-const COOLDOWN_MS = 30 * 60 * 1000;
+// 6-hour cooldown between scraper runs — caps to ≤ 4 runs/day
+const COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
 export function canScrape(): boolean {
   if (scraperStatus.isRunning) return false;
@@ -62,6 +63,7 @@ export async function runAllScrapers(): Promise<{ added: number; total: number; 
 
     scraperStatus.lastScrapedAt = new Date().toISOString();
     scraperStatus.byPlatform = byPlatform;
+    console.log(`[Scraper] Run finished. Apify spend today: ${formatSpendSummary()}`);
     return { added, total: momentsStore.size, byPlatform };
   } finally {
     scraperStatus.isRunning = false;

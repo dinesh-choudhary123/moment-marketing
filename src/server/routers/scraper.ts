@@ -38,8 +38,13 @@ export const scraperRouter = router({
   scrapeAll: publicProcedure
     .input(z.object({}).optional())
     .mutation(async () => {
-      if (scraperStatus.isRunning) {
-        return { success: false, message: 'Scrape already in progress', added: 0, total: momentsStore.size };
+      if (!canScrape()) {
+        return {
+          success: false,
+          message: 'Scraper cooled down (6h) — try again later',
+          added: 0,
+          total: momentsStore.size,
+        };
       }
       const result = await runAllScrapers();
       return {
@@ -52,6 +57,9 @@ export const scraperRouter = router({
   scrapeReddit: publicProcedure
     .input(z.object({ sort: z.enum(['hot', 'top', 'new', 'relevance']).default('hot') }))
     .mutation(async ({ input }) => {
+      if (!canScrape()) {
+        return { success: false, message: 'Scraper cooled down (6h) — try again later', added: 0, total: momentsStore.size };
+      }
       const moments = await fetchRedditTrends(input.sort);
       const added = replacePlatformMoments('Reddit', moments);
       return {
@@ -65,6 +73,9 @@ export const scraperRouter = router({
   scrapeInstagram: publicProcedure
     .input(z.object({}).optional())
     .mutation(async () => {
+      if (!canScrape()) {
+        return { success: false, message: 'Scraper cooled down (6h) — try again later', added: 0, total: momentsStore.size };
+      }
       const moments = await fetchInstagramTrends();
       const added = replacePlatformMoments('Instagram', moments);
       return {
@@ -80,6 +91,9 @@ export const scraperRouter = router({
   scrapeFacebook: publicProcedure
     .input(z.object({}).optional())
     .mutation(async () => {
+      if (!canScrape()) {
+        return { success: false, message: 'Scraper cooled down (6h) — try again later', added: 0, total: momentsStore.size };
+      }
       const moments = await fetchFacebookTrends();
       const added = replacePlatformMoments('Facebook', moments);
       return {

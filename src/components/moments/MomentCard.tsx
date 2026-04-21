@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Image from 'next/image';
 import { CalendarPlus, CalendarX, TrendingUp, Zap, Tag, Clock, X } from 'lucide-react';
 import type { Moment } from '@/types';
@@ -36,7 +36,18 @@ export function MomentCard({ moment, onAdded }: MomentCardProps) {
   const [imgError, setImgError] = useState(false);
   const [imgZoomed, setImgZoomed] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
-  const momentDate = moment.date ?? new Date().toISOString().split('T')[0];
+  // Parse moment.date defensively — old stored records may have bad strings,
+  // or the field may already be full ISO rather than YYYY-MM-DD.
+  function parseMomentDate(raw: string | undefined): Date | null {
+    if (!raw) return null;
+    // Prefer YYYY-MM-DD at local midnight; else let Date parse the full ISO
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? new Date(raw + 'T00:00:00') : new Date(raw);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const parsedDate = parseMomentDate(moment.date);
+  const momentDate = parsedDate
+    ? parsedDate.toISOString().split('T')[0]
+    : new Date().toISOString().split('T')[0];
 
   const utils = trpc.useUtils();
 
@@ -61,6 +72,19 @@ export function MomentCard({ moment, onAdded }: MomentCardProps) {
     },
     onError: (e) => toast(e.message, 'error'),
   });
+
+  // Lazily generate a context blurb when the detail popup opens.
+  // Only trust cached context that came from the AI (starts with [ai] marker).
+  const cachedAiContext = moment.context?.startsWith('[ai]') ? moment.context.slice(4).trim() : '';
+  const [context, setContext] = useState<string>(cachedAiContext);
+  const generateContext = trpc.moments.generateContext.useMutation({
+    onSuccess: (data) => setContext(data.context),
+  });
+  useEffect(() => {
+    if (detailOpen && !context && !generateContext.isPending) {
+      generateContext.mutate({ momentId: moment.id });
+    }
+  }, [detailOpen, context, generateContext, moment.id]);
 
   const placeholderColors = [
     'from-indigo-400 to-purple-500',
@@ -126,10 +150,10 @@ export function MomentCard({ moment, onAdded }: MomentCardProps) {
             </p>
           </div>
 
-          {moment.date && (
+          {parsedDate && (
             <p className="text-[11px] text-[var(--muted)] font-medium flex items-center gap-1">
               <Clock className="w-3 h-3" />
-              {new Date(moment.date + 'T00:00:00').toLocaleDateString('en-US', {
+              {parsedDate.toLocaleDateString('en-US', {
                 month: 'short', day: 'numeric', year: 'numeric',
               })}
             </p>
@@ -252,20 +276,45 @@ export function MomentCard({ moment, onAdded }: MomentCardProps) {
               </div>
 
               {/* When */}
-              {moment.date && (
+              {parsedDate && (
                 <div>
                   <p className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wide mb-1">When Trending</p>
                   <p className="text-sm text-[var(--foreground)] flex items-center gap-1.5">
                     <Clock className="w-3.5 h-3.5 text-[var(--muted)]" />
-                    {new Date(moment.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                    {parsedDate.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
                   </p>
                 </div>
               )}
 
-              {/* Context */}
+              {/* Why it's trending */}
               <div>
-                <p className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wide mb-1">Context</p>
-                <p className="text-xs text-[var(--foreground)] leading-relaxed">{moment.description}</p>
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wide">Why It&apos;s Trending</p>
+                  <button
+                    onClick={() => { setContext(''); generateContext.mutate({ momentId: moment.id, force: true }); }}
+                    disabled={generateContext.isPending}
+                    className="text-[10px] text-[var(--accent)] hover:underline disabled:opacity-50"
+                  >
+                    {generateContext.isPending ? '…' : '↻ Regenerate'}
+                  </button>
+                </div>
+                {context ? (
+                  <p className="text-xs text-[var(--foreground)] leading-relaxed">{context}</p>
+                ) : generateContext.isPending ? (
+                  <div className="space-y-1.5">
+                    <div className="skeleton h-3 rounded w-full" />
+                    <div className="skeleton h-3 rounded w-11/12" />
+                    <div className="skeleton h-3 rounded w-4/5" />
+                  </div>
+                ) : (
+                  <p className="text-xs text-[var(--muted)] italic">Generating context…</p>
+                )}
+              </div>
+
+              {/* Raw source stats */}
+              <div>
+                <p className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wide mb-1">Source Stats</p>
+                <p className="text-xs text-[var(--muted)] leading-relaxed">{moment.description}</p>
               </div>
 
               {/* Tags */}

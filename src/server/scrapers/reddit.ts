@@ -7,6 +7,12 @@ const HEADERS = { 'User-Agent': 'MomentMarketing/1.0 (by /u/momentmarketing)' };
 
 // Surface posts with ≥1k upvotes — captures normal trending content, not just mega-viral
 const VIRAL_UPVOTE_THRESHOLD = 1_000;
+// Only keep posts created within the last 48 hours
+const FRESHNESS_WINDOW_MS = 48 * 60 * 60 * 1000;
+function isFresh(unixSec: number | undefined): boolean {
+  if (!unixSec) return false;
+  return Date.now() - unixSec * 1000 <= FRESHNESS_WINDOW_MS;
+}
 
 // Subreddits to scrape for viral global + India-centric content
 const TRENDING_SUBREDDITS = [
@@ -227,6 +233,7 @@ export async function fetchRedditTrends(sort: RedditSortOption = 'top'): Promise
     const viralPosts = allPosts
       .filter(d => {
         if (!d.title) return false;
+        if (!isFresh(d.created_utc)) return false;
         const ups = d.ups ?? d.score ?? 0;
         // Only keep actually viral posts
         if (ups < VIRAL_UPVOTE_THRESHOLD) return false;
@@ -253,6 +260,7 @@ export async function fetchRedditTrends(sort: RedditSortOption = 'top'): Promise
         imageUrl,
         trendingScore: score,
         platform: 'Reddit',
+        originDate: d.created_utc ? new Date(d.created_utc * 1000).toISOString() : undefined,
       });
     }).filter((m): m is NonNullable<typeof m> => m !== null);
   } catch (e) {

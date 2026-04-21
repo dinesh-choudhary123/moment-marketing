@@ -1,7 +1,7 @@
 'use client';
 
 import { useRef, useState, useEffect } from 'react';
-import { Filter, ChevronDown, Check, X } from 'lucide-react';
+import { Filter, ChevronDown, Check, X, Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MOMENT_TYPES, MOMENT_CATEGORIES, MOMENT_PRIORITIES, PLATFORMS } from '@/lib/constants';
 import type { MomentsFilterState, MomentType, MomentCategory, MomentPriority, Platform } from '@/types';
@@ -229,6 +229,27 @@ export function MomentsFilters({ filters, onChange }: MomentsFiltersProps) {
         selected={filters.platforms}
         onChange={vals => onChange({ ...filters, platforms: vals as Platform[] })}
       />
+
+      {/* Search — spacer before it */}
+      <div className="ml-3 relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--muted)] pointer-events-none" />
+        <input
+          type="text"
+          value={filters.search}
+          onChange={e => onChange({ ...filters, search: e.target.value })}
+          placeholder="Search moments..."
+          className="pl-9 pr-8 py-2 text-sm border border-[var(--card-border)] rounded-xl bg-[var(--card)] text-[var(--foreground)] w-56 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40"
+        />
+        {filters.search && (
+          <button
+            onClick={() => onChange({ ...filters, search: '' })}
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded-full hover:bg-[var(--background)] text-[var(--muted)]"
+            aria-label="Clear search"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
 
       {/* Clear all */}
       {hasActive && (

@@ -64,10 +64,10 @@ export function BenchmarkingModal({ entry, onClose }: Props) {
         ...(result.brandName && !f.brandName ? { brandName: result.brandName } : {}),
       }));
       if (result.fetched) toast('✅ Metrics fetched successfully!');
-      else toast('Could not extract metrics automatically — enter manually', 'error');
+      else toast(result.error || 'Could not extract metrics — enter manually', 'error');
     } catch (e) {
       console.error('[BenchmarkingModal] fetchUrlMeta error:', e);
-      toast('Scraping failed — check server logs or enter manually', 'error');
+      toast(e instanceof Error ? e.message : 'Scraping failed — check server logs', 'error');
     } finally {
       setFetchingUrl(false);
     }
@@ -81,7 +81,7 @@ export function BenchmarkingModal({ entry, onClose }: Props) {
       const result = await fetchUrlMeta.mutateAsync({ url: editForm.url });
       setEditForm(f => ({ ...f, likes: result.likes, views: result.views, comments: result.comments, shares: result.shares }));
       if (result.fetched) toast('✅ Metrics fetched successfully!');
-      else toast('Could not extract metrics — enter manually', 'error');
+      else toast(result.error || 'Could not extract metrics — enter manually', 'error');
     } catch (e) {
       console.error('[BenchmarkingModal] fetchUrlMeta edit error:', e);
       toast('Scraping failed — enter metrics manually', 'error');

@@ -24,17 +24,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             else if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
           } catch(e) {}
         `}} />
-        {/* Apply saved sidebar width before first paint — prevents layout shift */}
+        {/* Apply saved sidebar collapsed state before first paint — prevents layout shift */}
         <script dangerouslySetInnerHTML={{ __html: `
           try {
-            var sc = localStorage.getItem('mm-sidebar-collapsed');
-            document.documentElement.style.setProperty(
-              '--sidebar-width',
-              sc === 'true' ? '4rem' : '16rem'
-            );
-          } catch(e) {
-            document.documentElement.style.setProperty('--sidebar-width', '16rem');
-          }
+            if (localStorage.getItem('mm-sidebar-collapsed') === 'true') {
+              document.documentElement.setAttribute('data-sidebar-collapsed', 'true');
+            }
+          } catch(e) {}
         `}} />
       </head>
       <body className="min-h-full bg-[var(--background)] text-[var(--foreground)]">

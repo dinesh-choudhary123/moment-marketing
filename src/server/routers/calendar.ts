@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { router, publicProcedure } from '@/server/trpc';
 import { calendarStore, getCalendarEntries, addBenchmarkToEntry, removeBenchmarkFromEntry, updateBenchmarkInEntry } from '@/server/db/store';
 import { generateId } from '@/lib/utils';
+import { planCall, recordSpend } from '@/server/db/apify-spend';
 
 const CurrencySchema = z.enum(['INR', 'USD', 'EUR', 'GBP', 'JPY']);
 const OwnershipSchema = z.enum(['Say Hi!', 'Small Talk', 'Conversation']);
@@ -99,145 +100,158 @@ export const calendarRouter = router({
       const url = input.url;
 
       function extractUsername(u: string): string {
-        const m = u.match(/(?:instagram\.com|twitter\.com|x\.com|youtube\.com\/@?)\/([^/?#]+)/);
+        const m = u.match(/(?:instagram\.com|twitter\.com|x\.com|youtube\.com|facebook\.com)\/@?([^/?#]+)/);
         return m?.[1] ?? '';
       }
       const fallbackBrand = extractUsername(url);
+      const zero = { likes: 0, comments: 0, views: 0, shares: 0, brandName: fallbackBrand, fetched: false, error: '' as string };
 
-      // 2-step: start run → wait → fetch dataset  (same as working instagram.ts scraper)
-      async function runApify(
+      // Use the sync endpoint that returns dataset items in one call — matches the
+      // working scrapers in src/server/scrapers/{instagram,facebook}.ts
+      async function runApifySync(
         actorId: string,
         inputBody: Record<string, unknown>,
-        waitSecs = 120,
-      ): Promise<Record<string, unknown> | null> {
-        console.log(`[fetchUrlMeta] Starting Apify actor ${actorId} for ${url}`);
-        const runRes = await fetch(
-          `${APIFY_BASE}/acts/${actorId}/runs?waitForFinish=${waitSecs}`,
+        timeoutSecs = 180,
+      ): Promise<Record<string, unknown>[]> {
+        if (!APIFY_TOKEN) throw new Error('APIFY_TOKEN not configured on server');
+        console.log(`[fetchUrlMeta] ${actorId} ← ${url}`);
+        const res = await fetch(
+          `${APIFY_BASE}/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}&timeout=${timeoutSecs}`,
           {
             method: 'POST',
-            headers: {
-              Authorization: `Bearer ${APIFY_TOKEN}`,
-              'Content-Type': 'application/json',
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(inputBody),
-            signal: AbortSignal.timeout((waitSecs + 30) * 1000),
+            signal: AbortSignal.timeout((timeoutSecs + 30) * 1000),
           },
         );
-        if (!runRes.ok) {
-          const txt = await runRes.text();
-          console.error(`[fetchUrlMeta] ${actorId} run error ${runRes.status}:`, txt.slice(0, 300));
-          return null;
+        if (!res.ok) {
+          const txt = await res.text();
+          console.error(`[fetchUrlMeta] ${actorId} ${res.status}:`, txt.slice(0, 300));
+          throw new Error(`Apify ${actorId} failed: ${res.status} ${txt.slice(0, 120)}`);
         }
-        const runData = await runRes.json() as { data?: { defaultDatasetId?: string; status?: string } };
-        console.log(`[fetchUrlMeta] ${actorId} run status:`, runData.data?.status, 'datasetId:', runData.data?.defaultDatasetId);
-        const datasetId = runData.data?.defaultDatasetId;
-        if (!datasetId) return null;
-
-        const dataRes = await fetch(
-          `${APIFY_BASE}/datasets/${datasetId}/items?format=json&limit=1`,
-          { headers: { Authorization: `Bearer ${APIFY_TOKEN}` } },
-        );
-        if (!dataRes.ok) {
-          console.error(`[fetchUrlMeta] dataset fetch error ${dataRes.status}`);
-          return null;
-        }
-        const items = await dataRes.json() as Record<string, unknown>[];
-        console.log(`[fetchUrlMeta] ${actorId} returned ${items.length} items, keys:`, items[0] ? Object.keys(items[0]).slice(0, 15) : []);
-        return items[0] ?? null;
+        const items = await res.json() as Record<string, unknown>[];
+        console.log(`[fetchUrlMeta] ${actorId} → ${items.length} items; keys:`, items[0] ? Object.keys(items[0]).slice(0, 20) : []);
+        return items;
       }
 
       // ── Instagram post / reel ─────────────────────────────────────────
       if (/instagram\.com\/(p|reel|tv)\//.test(url)) {
+        const safe = planCall('apify/instagram-scraper', 1, 1);
+        if (safe === null) return { ...zero, error: 'Daily Apify budget ($2) exhausted — try again tomorrow' };
         try {
-          const post = await runApify('apify~instagram-scraper', {
+          const items = await runApifySync('apify~instagram-scraper', {
             directUrls: [url],
             resultsType: 'posts',
             resultsLimit: 1,
             addParentData: false,
           });
-          if (post) {
-            return {
-              likes: Number(post.likesCount ?? post.likes ?? 0),
-              comments: Number(post.commentsCount ?? post.comments ?? 0),
-              views: Number(post.videoViewCount ?? post.videoPlayCount ?? post.playsCount ?? 0),
-              shares: Number(post.sharesCount ?? 0),
-              brandName: String(post.ownerFullName ?? post.ownerUsername ?? fallbackBrand),
-              fetched: true,
-            };
-          }
-        } catch (e) { console.error('[fetchUrlMeta] Instagram:', e); }
-        return { likes: 0, comments: 0, views: 0, shares: 0, brandName: fallbackBrand, fetched: false };
+          recordSpend('apify/instagram-scraper', items.length);
+          const post = items[0];
+          if (!post) return { ...zero, error: 'Instagram post not found or is private' };
+          return {
+            likes: Number(post.likesCount ?? post.likes ?? 0),
+            comments: Number(post.commentsCount ?? post.comments ?? 0),
+            views: Number(post.videoViewCount ?? post.videoPlayCount ?? post.playsCount ?? 0),
+            shares: Number(post.sharesCount ?? 0),
+            brandName: String(post.ownerFullName ?? post.ownerUsername ?? fallbackBrand),
+            fetched: true,
+            error: '',
+          };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error('[fetchUrlMeta] Instagram:', msg);
+          return { ...zero, error: `Instagram fetch failed: ${msg}` };
+        }
       }
 
-      // ── Twitter / X ───────────────────────────────────────────────────
+      // ── Twitter / X ─── use apidojo/tweet-scraper (quacker is deprecated) ─
       if (/twitter\.com|x\.com/.test(url)) {
         try {
-          const tweet = await runApify('quacker~twitter-scraper', {
-            startUrls: [{ url }],
-            maxTweets: 1,
-            addUserInfo: false,
+          const items = await runApifySync('apidojo~tweet-scraper', {
+            startUrls: [url],
+            maxItems: 1,
           });
-          if (tweet) {
-            return {
-              likes: Number(tweet.favoriteCount ?? tweet.likeCount ?? tweet.likes ?? 0),
-              comments: Number(tweet.replyCount ?? tweet.replies ?? 0),
-              shares: Number(tweet.retweetCount ?? tweet.retweets ?? tweet.quoteCount ?? 0),
-              views: Number(tweet.viewCount ?? tweet.views ?? 0),
-              brandName: String(tweet.user_name ?? tweet.userName ?? fallbackBrand),
-              fetched: true,
-            };
-          }
-        } catch (e) { console.error('[fetchUrlMeta] Twitter:', e); }
-        return { likes: 0, comments: 0, views: 0, shares: 0, brandName: fallbackBrand, fetched: false };
+          const tweet = items[0];
+          if (!tweet) return { ...zero, error: 'Tweet not found or protected' };
+          const author = tweet.author as Record<string, unknown> | undefined;
+          return {
+            likes: Number(tweet.likeCount ?? tweet.favoriteCount ?? tweet.likes ?? 0),
+            comments: Number(tweet.replyCount ?? tweet.replies ?? 0),
+            shares: Number(tweet.retweetCount ?? tweet.retweets ?? 0) + Number(tweet.quoteCount ?? 0),
+            views: Number(tweet.viewCount ?? tweet.views ?? 0),
+            brandName: String(author?.name ?? author?.userName ?? tweet.user_name ?? fallbackBrand),
+            fetched: true,
+            error: '',
+          };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error('[fetchUrlMeta] Twitter:', msg);
+          return { ...zero, error: `Twitter fetch failed: ${msg}` };
+        }
       }
 
-      // ── YouTube ───────────────────────────────────────────────────────
-      if (/youtube\.com\/watch|youtu\.be\//.test(url)) {
+      // ── YouTube ── use free YouTube Data API (no Apify cost) ──────────
+      if (/youtube\.com\/watch|youtu\.be\/|youtube\.com\/shorts\//.test(url)) {
+        const key = process.env.YOUTUBE_API_KEY;
+        if (!key) return { ...zero, error: 'YOUTUBE_API_KEY not configured' };
         try {
-          const video = await runApify('streamers~youtube-scraper', {
-            startUrls: [{ url }],
-            maxResults: 1,
-            downloadSubtitles: false,
-            saveHtml: false,
-            saveMarkdown: false,
-          });
-          if (video) {
-            return {
-              likes: Number(video.likes ?? video.likeCount ?? 0),
-              comments: Number(video.commentCount ?? video.numberOfComments ?? 0),
-              views: Number(video.viewCount ?? video.numberOfViews ?? 0),
-              shares: 0,
-              brandName: String(video.channelName ?? (video.channel as Record<string,unknown>|undefined)?.name ?? fallbackBrand),
-              fetched: true,
-            };
+          const vidMatch = url.match(/(?:v=|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})/);
+          const videoId = vidMatch?.[1];
+          if (!videoId) return { ...zero, error: 'Could not extract YouTube video ID from URL' };
+          const apiUrl = `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&id=${videoId}&key=${key}`;
+          const res = await fetch(apiUrl, { signal: AbortSignal.timeout(15_000) });
+          if (!res.ok) {
+            const txt = await res.text();
+            return { ...zero, error: `YouTube API ${res.status}: ${txt.slice(0, 100)}` };
           }
-        } catch (e) { console.error('[fetchUrlMeta] YouTube:', e); }
-        return { likes: 0, comments: 0, views: 0, shares: 0, brandName: fallbackBrand, fetched: false };
+          const data = await res.json() as { items?: Array<{ snippet?: { channelTitle?: string }; statistics?: { likeCount?: string; commentCount?: string; viewCount?: string } }> };
+          const item = data.items?.[0];
+          if (!item) return { ...zero, error: 'YouTube video not found (private or removed)' };
+          return {
+            likes: parseInt(item.statistics?.likeCount ?? '0'),
+            comments: parseInt(item.statistics?.commentCount ?? '0'),
+            views: parseInt(item.statistics?.viewCount ?? '0'),
+            shares: 0,
+            brandName: item.snippet?.channelTitle ?? fallbackBrand,
+            fetched: true,
+            error: '',
+          };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error('[fetchUrlMeta] YouTube:', msg);
+          return { ...zero, error: `YouTube fetch failed: ${msg}` };
+        }
       }
 
       // ── Facebook ──────────────────────────────────────────────────────
-      if (/facebook\.com/.test(url)) {
+      if (/facebook\.com|fb\.watch/.test(url)) {
+        const safe = planCall('apify/facebook-posts-scraper', 1, 1);
+        if (safe === null) return { ...zero, error: 'Daily Apify budget ($2) exhausted — try again tomorrow' };
         try {
-          const post = await runApify('apify~facebook-posts-scraper', {
+          const items = await runApifySync('apify~facebook-posts-scraper', {
             startUrls: [{ url }],
-            maxPosts: 1,
-            maxPostComments: 0,
+            resultsLimit: 1,
           });
-          if (post) {
-            return {
-              likes: Number(post.likes ?? post.reactionsCount ?? 0),
-              comments: Number(post.commentsCount ?? 0),
-              shares: Number(post.sharesCount ?? post.shares ?? 0),
-              views: Number(post.videoViewCount ?? 0),
-              brandName: String(post.pageName ?? post.authorName ?? fallbackBrand),
-              fetched: true,
-            };
-          }
-        } catch (e) { console.error('[fetchUrlMeta] Facebook:', e); }
-        return { likes: 0, comments: 0, views: 0, shares: 0, brandName: fallbackBrand, fetched: false };
+          recordSpend('apify/facebook-posts-scraper', items.length);
+          const post = items[0];
+          if (!post) return { ...zero, error: 'Facebook post not found or requires login' };
+          return {
+            likes: Number(post.likes ?? post.likesCount ?? post.reactionsCount ?? 0),
+            comments: Number(post.comments ?? post.commentsCount ?? 0),
+            shares: Number(post.shares ?? post.sharesCount ?? 0),
+            views: Number(post.viewsCount ?? post.videoViewCount ?? post.videoPlayCount ?? 0),
+            brandName: String(post.pageName ?? (post.user as Record<string, unknown> | undefined)?.name ?? post.authorName ?? fallbackBrand),
+            fetched: true,
+            error: '',
+          };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error('[fetchUrlMeta] Facebook:', msg);
+          return { ...zero, error: `Facebook fetch failed: ${msg}` };
+        }
       }
 
-      return { likes: 0, views: 0, comments: 0, shares: 0, brandName: fallbackBrand, fetched: false };
+      return { ...zero, error: 'Unsupported URL — paste an Instagram, Twitter/X, YouTube or Facebook post link' };
     }),
 
   getBudgetSummary: publicProcedure

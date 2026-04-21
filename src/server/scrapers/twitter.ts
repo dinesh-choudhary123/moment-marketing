@@ -79,6 +79,13 @@ const MAX_QUERIES_PER_RUN = 10;
 
 // Lower threshold to capture medium-viral trends too — gives Low/Medium priority moments
 const VIRAL_LIKES_THRESHOLD = 500;
+// Only keep tweets created within the last 48 hours — "trending NOW"
+const FRESHNESS_WINDOW_MS = 48 * 60 * 60 * 1000;
+function isFresh(iso: string | undefined): boolean {
+  if (!iso) return false;
+  const t = new Date(iso).getTime();
+  return !isNaN(t) && Date.now() - t <= FRESHNESS_WINDOW_MS;
+}
 
 function extractImageFromTweet(tweet: Tweet, includes?: TweetSearchResponse['includes']): string | undefined {
   if (!tweet.attachments?.media_keys?.length || !includes?.media) return undefined;
@@ -145,9 +152,9 @@ export async function fetchTwitterTrends(): Promise<Moment[]> {
       const data = await res.json() as TweetSearchResponse;
       const tweets = data.data ?? [];
 
-      // Filter by viral threshold
+      // Filter by freshness (< 48h) + viral threshold
       const viral = tweets
-        .filter(t => (t.public_metrics?.like_count ?? 0) >= VIRAL_LIKES_THRESHOLD)
+        .filter(t => isFresh(t.created_at) && (t.public_metrics?.like_count ?? 0) >= VIRAL_LIKES_THRESHOLD)
         .sort((a, b) => {
           const aScore = (a.public_metrics?.like_count ?? 0) + (a.public_metrics?.retweet_count ?? 0) * 3;
           const bScore = (b.public_metrics?.like_count ?? 0) + (b.public_metrics?.retweet_count ?? 0) * 3;
@@ -179,6 +186,7 @@ export async function fetchTwitterTrends(): Promise<Moment[]> {
           imageUrl,
           trendingScore: score,
           platform: 'Twitter',
+          originDate: tweet.created_at,
         });
         if (moment) results.push(moment);
       }

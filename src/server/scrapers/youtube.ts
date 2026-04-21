@@ -39,8 +39,15 @@ export async function fetchYouTubeTrends(): Promise<Moment[]> {
     }
 
     const VIRAL_VIEWS_THRESHOLD = 100_000;
+    const FRESHNESS_WINDOW_MS = 48 * 60 * 60 * 1000;
     const items = data.items ?? [];
-    const viral = items.filter(item => parseInt(item.statistics?.viewCount ?? '0') >= VIRAL_VIEWS_THRESHOLD);
+    const viral = items.filter(item => {
+      const pub = item.snippet?.publishedAt;
+      if (!pub) return false;
+      const t = new Date(pub).getTime();
+      if (isNaN(t) || Date.now() - t > FRESHNESS_WINDOW_MS) return false;
+      return parseInt(item.statistics?.viewCount ?? '0') >= VIRAL_VIEWS_THRESHOLD;
+    });
 
     console.log(`[YouTube] Found ${viral.length} viral videos (≥${VIRAL_VIEWS_THRESHOLD.toLocaleString()} views) out of ${items.length} scraped`);
 
@@ -58,6 +65,7 @@ export async function fetchYouTubeTrends(): Promise<Moment[]> {
         imageUrl: thumb,
         trendingScore: score,
         platform: 'YouTube',
+        originDate: item.snippet?.publishedAt,
       });
     }).filter((m): m is NonNullable<typeof m> => m !== null);
   } catch (e) {

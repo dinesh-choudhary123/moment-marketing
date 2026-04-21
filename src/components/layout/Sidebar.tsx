@@ -101,16 +101,17 @@ export function Sidebar() {
   const [coctmOpen, setCoctmOpen] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
 
-  // On mount: read localStorage and apply sidebar width CSS var
+  // On mount: read localStorage and sync sidebar collapsed state
   useEffect(() => {
     try {
       const saved = localStorage.getItem('mm-sidebar-collapsed');
       const isCollapsed = saved === 'true';
       setCollapsed(isCollapsed);
-      document.documentElement.style.setProperty(
-        '--sidebar-width',
-        isCollapsed ? '4rem' : '16rem',
-      );
+      if (isCollapsed) {
+        document.documentElement.setAttribute('data-sidebar-collapsed', 'true');
+      } else {
+        document.documentElement.removeAttribute('data-sidebar-collapsed');
+      }
     } catch {}
   }, []);
 
@@ -118,10 +119,11 @@ export function Sidebar() {
     const next = !collapsed;
     setCollapsed(next);
     try { localStorage.setItem('mm-sidebar-collapsed', String(next)); } catch {}
-    document.documentElement.style.setProperty(
-      '--sidebar-width',
-      next ? '4rem' : '16rem',
-    );
+    if (next) {
+      document.documentElement.setAttribute('data-sidebar-collapsed', 'true');
+    } else {
+      document.documentElement.removeAttribute('data-sidebar-collapsed');
+    }
   }
 
   const isActive = (href: string) => {

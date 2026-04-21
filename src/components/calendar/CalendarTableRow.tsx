@@ -1,12 +1,18 @@
 'use client';
 
 import { useState } from 'react';
+import { ExternalLink } from 'lucide-react';
 import { trpc } from '@/lib/trpc';
 import { TypeBadge } from '@/components/ui/Badge';
 import { ActionMenu } from './ActionMenu';
 import type { CalendarEntry, Ownership, Currency } from '@/types';
 import { OWNERSHIPS } from '@/lib/constants';
-import { cn } from '@/lib/utils';
+
+function formatCompact(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1).replace(/\.0$/, '') + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(n >= 10_000 ? 0 : 1).replace(/\.0$/, '') + 'K';
+  return n.toLocaleString();
+}
 
 interface Props {
   entry: CalendarEntry;
@@ -32,6 +38,7 @@ export function CalendarTableRow({ entry, currency, onBenchmark, onView, onMakeP
 
   const dateObj = new Date(entry.date);
   const month = dateObj.toLocaleString('en-US', { month: 'short' });
+  const monthLong = dateObj.toLocaleString('en-US', { month: 'long' });
   const day = dateObj.getDate();
   const year = dateObj.getFullYear();
 
@@ -51,12 +58,13 @@ export function CalendarTableRow({ entry, currency, onBenchmark, onView, onMakeP
           </div>
           <div>
             <p className="text-xs font-medium text-[var(--foreground)]">{month} {day}, {year}</p>
+            <p className="text-[10px] text-[var(--muted)] mt-0.5">{entry.day}</p>
           </div>
         </div>
       </td>
 
-      {/* Day */}
-      <td className="py-3 px-3 text-sm text-[var(--muted)]">{entry.day}</td>
+      {/* Month */}
+      <td className="py-3 px-3 text-sm text-[var(--muted)]">{monthLong}</td>
 
       {/* Event Name */}
       <td className="py-3 px-3">
@@ -110,17 +118,42 @@ export function CalendarTableRow({ entry, currency, onBenchmark, onView, onMakeP
 
       {/* Benchmarking */}
       <td className="py-3 px-3">
-        <button
-          onClick={() => onBenchmark(entry)}
-          className={cn(
-            'text-xs font-semibold transition-colors',
-            entry.benchmarks.length > 0
-              ? 'text-[var(--accent)] hover:underline'
-              : 'text-emerald-600 hover:text-emerald-700',
-          )}
-        >
-          {entry.benchmarks.length > 0 ? `${entry.benchmarks.length} added` : 'Add'}
-        </button>
+        {entry.benchmarks.length > 0 ? (() => {
+          const totalViews = entry.benchmarks.reduce((s, b) => s + (b.views ?? 0), 0);
+          const top = entry.benchmarks.reduce((a, b) => (b.views ?? 0) > (a.views ?? 0) ? b : a);
+          return (
+            <div className="flex flex-col gap-0.5">
+              <button
+                onClick={() => onBenchmark(entry)}
+                className="text-xs font-semibold text-[var(--accent)] hover:underline text-left"
+              >
+                {entry.benchmarks.length} added · {formatCompact(totalViews)} views
+              </button>
+              <div className="flex items-center gap-1 text-[10px] text-[var(--muted)]">
+                <span>Top: {formatCompact(top.views ?? 0)}</span>
+                {top.url && (
+                  <a
+                    href={top.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={e => e.stopPropagation()}
+                    title={`Open top post: ${top.brandName}`}
+                    className="text-[var(--accent)] hover:opacity-70"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+              </div>
+            </div>
+          );
+        })() : (
+          <button
+            onClick={() => onBenchmark(entry)}
+            className="text-xs font-semibold text-emerald-600 hover:text-emerald-700 transition-colors"
+          >
+            Add
+          </button>
+        )}
       </td>
 
       {/* Actions */}
