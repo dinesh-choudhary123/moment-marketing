@@ -172,9 +172,18 @@ export async function fetchTwitterTrends(): Promise<Moment[]> {
 
       const description = `Trending on Twitter India • Rank #${trend.rank} • ${trend.twitterSearchUrl}`;
 
+      // Build a relevant search keyword for Unsplash by stripping # and camelCase-splitting
+      const cleanKeyword = trend.name
+        .replace(/^#/, '')
+        .replace(/([a-z])([A-Z])/g, '$1 $2') // CamelCase → words
+        .replace(/[_-]/g, ' ')
+        .trim();
+      const imageUrl = `https://source.unsplash.com/featured/800x450/?${encodeURIComponent(cleanKeyword)}`;
+
       return classifyTrend({
         name: trend.name,
         description,
+        imageUrl,
         trendingScore,
         platform: 'Twitter',
         originDate: now,
