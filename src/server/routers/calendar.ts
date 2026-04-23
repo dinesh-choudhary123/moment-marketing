@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { router, publicProcedure } from '@/server/trpc';
 import { calendarStore, getCalendarEntries, addBenchmarkToEntry, removeBenchmarkFromEntry, updateBenchmarkInEntry } from '@/server/db/store';
 import { generateId } from '@/lib/utils';
-import { planCall, recordSpend } from '@/server/db/apify-spend';
+import { reserveCall, commitActual, releaseReservation } from '@/server/db/apify-spend';
 
 const CurrencySchema = z.enum(['INR', 'USD', 'EUR', 'GBP', 'JPY']);
 const OwnershipSchema = z.enum(['Say Hi!', 'Small Talk', 'Conversation']);
@@ -136,8 +136,8 @@ export const calendarRouter = router({
 
       // ── Instagram post / reel ─────────────────────────────────────────
       if (/instagram\.com\/(p|reel|tv)\//.test(url)) {
-        const safe = planCall('apify/instagram-scraper', 1, 1);
-        if (safe === null) return { ...zero, error: 'Daily Apify budget ($2) exhausted — try again tomorrow' };
+        const reservation = await reserveCall('apify/instagram-scraper', 1, 1);
+        if (!reservation) return { ...zero, error: 'Daily Apify budget ($2) exhausted — try again tomorrow' };
         try {
           const items = await runApifySync('apify~instagram-scraper', {
             directUrls: [url],
@@ -145,7 +145,7 @@ export const calendarRouter = router({
             resultsLimit: 1,
             addParentData: false,
           });
-          recordSpend('apify/instagram-scraper', items.length);
+          await commitActual(reservation, items.length);
           const post = items[0];
           if (!post) return { ...zero, error: 'Instagram post not found or is private' };
           return {
@@ -158,6 +158,7 @@ export const calendarRouter = router({
             error: '',
           };
         } catch (e) {
+          await releaseReservation(reservation);
           const msg = e instanceof Error ? e.message : String(e);
           console.error('[fetchUrlMeta] Instagram:', msg);
           return { ...zero, error: `Instagram fetch failed: ${msg}` };
@@ -225,14 +226,14 @@ export const calendarRouter = router({
 
       // ── Facebook ──────────────────────────────────────────────────────
       if (/facebook\.com|fb\.watch/.test(url)) {
-        const safe = planCall('apify/facebook-posts-scraper', 1, 1);
-        if (safe === null) return { ...zero, error: 'Daily Apify budget ($2) exhausted — try again tomorrow' };
+        const reservation = await reserveCall('apify/facebook-posts-scraper', 1, 1);
+        if (!reservation) return { ...zero, error: 'Daily Apify budget ($2) exhausted — try again tomorrow' };
         try {
           const items = await runApifySync('apify~facebook-posts-scraper', {
             startUrls: [{ url }],
             resultsLimit: 1,
           });
-          recordSpend('apify/facebook-posts-scraper', items.length);
+          await commitActual(reservation, items.length);
           const post = items[0];
           if (!post) return { ...zero, error: 'Facebook post not found or requires login' };
           return {
@@ -245,6 +246,7 @@ export const calendarRouter = router({
             error: '',
           };
         } catch (e) {
+          await releaseReservation(reservation);
           const msg = e instanceof Error ? e.message : String(e);
           console.error('[fetchUrlMeta] Facebook:', msg);
           return { ...zero, error: `Facebook fetch failed: ${msg}` };

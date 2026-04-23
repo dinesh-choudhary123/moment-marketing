@@ -1,6 +1,6 @@
 import type { Moment } from '@/types';
 import { classifyTrend } from './classifier';
-import { planCall, recordSpend } from '@/server/db/apify-spend';
+import { reserveCall, commitActual, releaseReservation } from '@/server/db/apify-spend';
 import { writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
@@ -249,44 +249,54 @@ async function getInstagramHashtagCount(query: string): Promise<number | undefin
 // ─── Apify primary path ───────────────────────────────────────────────────────
 
 async function fetchViaApify(token: string): Promise<Moment[]> {
-  // Daily spend gate — skip Apify entirely if remaining budget is too low.
-  const safeLimit = planCall('apify/instagram-scraper', DEFAULT_RESULTS_LIMIT, 20);
-  if (safeLimit === null) {
-    console.warn('[Instagram] Daily Apify budget exhausted — falling back to Google Trends');
+  // Pre-reserve budget atomically — blocks concurrent refreshes from double-spending.
+  const reservation = await reserveCall('apify/instagram-scraper', DEFAULT_RESULTS_LIMIT * TARGET_PROFILES.length, 20);
+  if (!reservation) {
+    console.warn('[Instagram] Daily Apify $2 cap reached — falling back to Google Trends');
     return [];
   }
+  const perProfileLimit = Math.max(1, Math.floor(reservation.safeLimit / TARGET_PROFILES.length));
 
-  console.log(`[Instagram] Apify: live scrape via run-sync-get-dataset-items (resultsLimit=${safeLimit}) ...`);
+  console.log(`[Instagram] Apify: live scrape via run-sync-get-dataset-items (resultsLimit=${perProfileLimit}/profile) ...`);
 
-  const res = await fetch(
-    `${APIFY_BASE}/acts/apify~instagram-scraper/run-sync-get-dataset-items?timeout=300&format=json`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
+  let posts: InstagramPost[] = [];
+  try {
+    const res = await fetch(
+      `${APIFY_BASE}/acts/apify~instagram-scraper/run-sync-get-dataset-items?timeout=300&format=json`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          directUrls: TARGET_PROFILES,
+          resultsType: 'posts',
+          resultsLimit: perProfileLimit,
+          addParentData: false,
+          searchType: 'user',
+          searchLimit: 1,
+        }),
+        signal: AbortSignal.timeout(310_000),
       },
-      body: JSON.stringify({
-        directUrls: TARGET_PROFILES,
-        resultsType: 'posts',
-        resultsLimit: safeLimit,
-        addParentData: false,
-        searchType: 'user',
-        searchLimit: 1,
-      }),
-      signal: AbortSignal.timeout(310_000),
-    },
-  );
+    );
 
-  if (!res.ok) {
-    const text = await res.text();
-    console.error(`[Instagram] Apify run error ${res.status}:`, text.slice(0, 300));
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`[Instagram] Apify run error ${res.status}:`, text.slice(0, 300));
+      await releaseReservation(reservation);
+      return [];
+    }
+
+    posts = (await res.json()) as InstagramPost[];
+  } catch (e) {
+    console.error('[Instagram] Apify fetch failed:', e);
+    await releaseReservation(reservation);
     return [];
   }
 
-  const posts = (await res.json()) as InstagramPost[];
-  // Record actual spend (items returned × rate).
-  recordSpend('apify/instagram-scraper', posts.length);
+  // Reconcile actual spend against reservation
+  await commitActual(reservation, posts.length);
   if (posts.length === 0) return [];
 
   const seen = new Set<string>();

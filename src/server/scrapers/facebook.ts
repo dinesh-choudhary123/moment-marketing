@@ -1,6 +1,6 @@
 import type { Moment } from '@/types';
 import { classifyTrend } from './classifier';
-import { planCall, recordSpend } from '@/server/db/apify-spend';
+import { reserveCall, commitActual, releaseReservation } from '@/server/db/apify-spend';
 
 // ─── Apify Config ────────────────────────────────────────────────────────────
 const APIFY_BASE = 'https://api.apify.com/v2';
@@ -254,40 +254,48 @@ function scoreRSSItem(item: RSSItem): number {
 // ─── Apify primary scraper ────────────────────────────────────────────────────
 
 async function fetchViaApify(token: string): Promise<Moment[]> {
-  // Daily spend gate — skip Apify entirely if remaining budget is too low.
-  const safeLimit = planCall('apify/facebook-posts-scraper', DEFAULT_RESULTS_LIMIT, 20);
-  if (safeLimit === null) {
-    console.warn('[Facebook] Daily Apify budget exhausted — falling back to RSS');
+  // Pre-reserve budget atomically — blocks concurrent refreshes from double-spending.
+  const reservation = await reserveCall('apify/facebook-posts-scraper', DEFAULT_RESULTS_LIMIT, 20);
+  if (!reservation) {
+    console.warn('[Facebook] Daily Apify $2 cap reached — falling back to RSS');
     return [];
   }
 
-  console.log(`[Facebook] Apify: live scrape via run-sync-get-dataset-items (resultsLimit=${safeLimit}) ...`);
+  console.log(`[Facebook] Apify: live scrape via run-sync-get-dataset-items (resultsLimit=${reservation.safeLimit}) ...`);
 
-  const res = await fetch(
-    `${APIFY_BASE}/acts/apify~facebook-posts-scraper/run-sync-get-dataset-items?timeout=300&format=json`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
+  let posts: FacebookPost[] = [];
+  try {
+    const res = await fetch(
+      `${APIFY_BASE}/acts/apify~facebook-posts-scraper/run-sync-get-dataset-items?timeout=300&format=json`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          startUrls: TRENDING_PAGES.map(url => ({ url })),
+          resultsLimit: reservation.safeLimit,
+        }),
+        signal: AbortSignal.timeout(310_000),
       },
-      body: JSON.stringify({
-        startUrls: TRENDING_PAGES.map(url => ({ url })),
-        resultsLimit: safeLimit,
-      }),
-      signal: AbortSignal.timeout(310_000),
-    },
-  );
+    );
 
-  if (!res.ok) {
-    const text = await res.text();
-    console.error(`[Facebook] Apify run error ${res.status}:`, text.slice(0, 300));
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`[Facebook] Apify run error ${res.status}:`, text.slice(0, 300));
+      await releaseReservation(reservation);
+      return [];
+    }
+
+    posts = (await res.json()) as FacebookPost[];
+  } catch (e) {
+    console.error('[Facebook] Apify fetch failed:', e);
+    await releaseReservation(reservation);
     return [];
   }
 
-  const posts = (await res.json()) as FacebookPost[];
-  // Record actual spend
-  recordSpend('apify/facebook-posts-scraper', posts.length);
+  await commitActual(reservation, posts.length);
   if (posts.length === 0) return [];
 
   const seen = new Set<string>();
