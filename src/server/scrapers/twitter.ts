@@ -1,5 +1,8 @@
 import type { Moment } from '@/types';
 import { classifyTrend } from './classifier';
+import { reserveCall, commitActual, releaseReservation } from '@/server/db/apify-spend';
+
+const APIFY_BASE = 'https://api.apify.com/v2';
 
 interface Tweet {
   text?: string;
@@ -112,10 +115,129 @@ function buildTweetTitle(tweet: Tweet): string {
   return (tweet.text ?? '').replace(/https?:\/\/\S+/g, '').replace(/\n/g, ' ').trim().slice(0, 80);
 }
 
+// ── Apify primary path — apidojo/tweet-scraper is cheap + no free-tier quota ──
+interface ApifyTweet {
+  text?: string;
+  likeCount?: number;
+  retweetCount?: number;
+  replyCount?: number;
+  quoteCount?: number;
+  viewCount?: number;
+  createdAt?: string;
+  author?: { userName?: string; name?: string };
+  hashtags?: string[];
+  entities?: { hashtags?: Array<{ tag?: string }> };
+  media?: Array<{ type?: string; url?: string; previewImageUrl?: string }>;
+}
+
+const APIFY_TWITTER_QUERIES = [
+  'IPL 2026 min_faves:200 lang:en -is:retweet',
+  'Bollywood min_faves:300 lang:en -is:retweet',
+  'India cricket min_faves:300 lang:en -is:retweet',
+  'viral India min_faves:500 lang:en -is:retweet',
+  'breaking India min_faves:300 lang:en -is:retweet',
+  '#trending India min_faves:200 lang:en -is:retweet',
+  'new song India min_faves:200 lang:en -is:retweet',
+  'Sensex Nifty min_faves:100 lang:en -is:retweet',
+];
+
+async function fetchViaApify(token: string): Promise<Moment[]> {
+  // Reserve ~250 tweets @ $0.0004 = $0.10 budget slice
+  const reservation = await reserveCall('apidojo/tweet-scraper', 250, 30);
+  if (!reservation) {
+    console.warn('[Twitter] Daily Apify $2 cap reached — falling back to X API');
+    return [];
+  }
+
+  let tweets: ApifyTweet[] = [];
+  try {
+    const res = await fetch(
+      `${APIFY_BASE}/acts/apidojo~tweet-scraper/run-sync-get-dataset-items?timeout=300&format=json`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          searchTerms: APIFY_TWITTER_QUERIES,
+          maxItems: reservation.safeLimit,
+          sort: 'Latest',
+          tweetLanguage: 'en',
+        }),
+        signal: AbortSignal.timeout(310_000),
+      },
+    );
+    if (!res.ok) {
+      const t = await res.text();
+      console.error(`[Twitter] Apify error ${res.status}:`, t.slice(0, 300));
+      await releaseReservation(reservation);
+      return [];
+    }
+    tweets = await res.json() as ApifyTweet[];
+  } catch (e) {
+    console.error('[Twitter] Apify fetch failed:', e);
+    await releaseReservation(reservation);
+    return [];
+  }
+  await commitActual(reservation, tweets.length);
+
+  const results: Moment[] = [];
+  const seenNames = new Set<string>();
+
+  const viral = tweets
+    .filter(t => t.text && isFresh(t.createdAt) && (t.likeCount ?? 0) >= VIRAL_LIKES_THRESHOLD)
+    .sort((a, b) => ((b.likeCount ?? 0) + (b.retweetCount ?? 0) * 3) - ((a.likeCount ?? 0) + (a.retweetCount ?? 0) * 3));
+
+  for (const tweet of viral.slice(0, 50)) {
+    const likes = tweet.likeCount ?? 0;
+    const rts = tweet.retweetCount ?? 0;
+    const replies = tweet.replyCount ?? 0;
+    const quotes = tweet.quoteCount ?? 0;
+    const engagement = likes + rts * 3 + replies + quotes * 2;
+    const score = Math.min(100, 50 + Math.floor(Math.log10(engagement + 1) * 10));
+
+    // Title preference: hashtags > clean text
+    const hashtags = (tweet.entities?.hashtags?.map(h => h.tag) ?? tweet.hashtags ?? []).filter(Boolean) as string[];
+    const titleFromTags = hashtags.slice(0, 4).map(t => `#${t}`).join(' ');
+    const cleanText = (tweet.text ?? '').replace(/https?:\/\/\S+/g, '').replace(/\n/g, ' ').trim();
+    const name = titleFromTags || cleanText.slice(0, 80);
+    const nameKey = name.toLowerCase().trim();
+    if (!name || seenNames.has(nameKey)) continue;
+    seenNames.add(nameKey);
+
+    const image = tweet.media?.find(m => m.type === 'photo' || m.type === 'video');
+    const imageUrl = image?.url ?? image?.previewImageUrl;
+    const hashtagStr = hashtags.slice(0, 3).map(t => `#${t}`).join(' ');
+    const description = `${cleanText} • ${likes.toLocaleString()} likes • ${rts.toLocaleString()} RTs${hashtagStr ? ' • ' + hashtagStr : ''}`;
+
+    const moment = classifyTrend({
+      name,
+      description: description.slice(0, 300),
+      imageUrl,
+      trendingScore: score,
+      platform: 'Twitter',
+      originDate: tweet.createdAt,
+    });
+    if (moment) results.push(moment);
+  }
+
+  console.log(`[Twitter] Apify returned ${tweets.length} tweets → ${results.length} viral (≥${VIRAL_LIKES_THRESHOLD} likes, <48h)`);
+  return results;
+}
+
 export async function fetchTwitterTrends(): Promise<Moment[]> {
+  // Prefer Apify — X API free tier is only 100 reads/month and exhausts fast.
+  const apifyToken = process.env.APIFY_TOKEN;
+  if (apifyToken) {
+    const apifyResults = await fetchViaApify(apifyToken);
+    if (apifyResults.length > 0) return apifyResults;
+    console.warn('[Twitter] Apify returned 0 — trying X API fallback');
+  }
+
   const token = process.env.TWITTER_BEARER_TOKEN;
   if (!token) {
-    console.warn('[Twitter] TWITTER_BEARER_TOKEN not set — skipping');
+    console.warn('[Twitter] Neither APIFY_TOKEN nor TWITTER_BEARER_TOKEN usable — skipping');
     return [];
   }
 

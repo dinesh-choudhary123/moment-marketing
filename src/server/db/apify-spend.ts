@@ -16,9 +16,13 @@ export const DAILY_CAP_USD = 2.0;
 export const COST_PER_ITEM: Record<ApifyActor, number> = {
   'apify/instagram-scraper': 0.0023, //  $2.30 / 1K items
   'apify/facebook-posts-scraper': 0.0050, // $5.00 / 1K items
+  'apidojo/tweet-scraper': 0.0004, //  $0.40 / 1K tweets (apidojo free/cheap tier)
 };
 
-export type ApifyActor = 'apify/instagram-scraper' | 'apify/facebook-posts-scraper';
+export type ApifyActor =
+  | 'apify/instagram-scraper'
+  | 'apify/facebook-posts-scraper'
+  | 'apidojo/tweet-scraper';
 
 interface Ledger {
   date: string; // YYYY-MM-DD (UTC)

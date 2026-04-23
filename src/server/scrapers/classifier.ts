@@ -114,24 +114,70 @@ function classifyType(name: string, description: string): MomentType {
   return 'Fluid';
 }
 
+// Score-based classification: count weighted keyword hits across ALL categories
+// and pick the winner. Strong signals (e.g. "IPL", "Oscar") weigh 3x; generic
+// words weigh 1x. Subreddit hints in the description are a very strong signal.
+// This replaces the old "first regex wins" approach that mis-filed things like
+// "IPL trailer release" as Sports just because "IPL" was listed first.
+const CATEGORY_KEYWORDS: Array<{
+  cat: MomentCategory;
+  strong: RegExp[]; // weight 3
+  weak: RegExp[];   // weight 1
+}> = [
+  { cat: 'Sports', strong: [/\bipl\b/, /\bfifa\b/, /\bnba\b/, /\bnfl\b/, /world cup/, /\bolympic/, /\bt20\b/, /\bodi\b/, /\btest match/], weak: [/cricket/, /football/, /tennis/, /\bf1\b/, /formula/, /\bsport\b/, /tournament/, /league/, /rugby/, /match day/, /goalkeeper/, /stadium/, /batting/, /bowler/, /innings/, /wicket/] },
+  { cat: 'Movies', strong: [/bollywood/, /hollywood/, /\boscar/, /filmfare/, /\bcannes\b/, /\bbafta\b/, /box office/, /\btrailer\b/], weak: [/movie/, /\bfilm\b/, /cinema/, /\bemmy\b/, /\bdirector\b/, /screenplay/, /premiere/, /\bactor\b/, /\bactress\b/] },
+  { cat: 'Music', strong: [/\bgrammy/, /\balbum\b/, /\bspotify/, /new song/, /music video/], weak: [/\bmusic\b/, /\bsong\b/, /concert/, /singer/, /\bartist\b/, /\bband\b/, /\btour\b/, /indie/, /\brap\b/, /\bpop\b/, /\blyric/, /\bmelody/] },
+  { cat: 'Gaming', strong: [/\bgta\b/, /valorant/, /\bpubg\b/, /\bbgmi\b/, /playstation/, /\bxbox\b/, /nintendo/, /esport/], weak: [/gaming/, /\bgame\b/, /streamer/, /twitch/, /fortnite/, /minecraft/] },
+  { cat: 'Tech', strong: [/chatgpt/, /\bopenai\b/, /\bsamsung\b/, /google pixel/, /\bnvidia\b/, /\bmeta ai/, /\biphone\b/, /\bapple\b(?! pie)/, /\bandroid\b/], weak: [/\btech\b/, /\bai\b/, /startup/, /software/, /hardware/, /gadget/, /\bphone\b/, /laptop/, /\bsaas\b/, /coding/, /developer/, /silicon/] },
+  { cat: 'Food', strong: [/michelin/, /street food/, /masterchef/], weak: [/\bfood\b/, /recipe/, /restaurant/, /cuisine/, /\beat\b/, /\bdish\b/, /\bcook\b/, /\bchef\b/, /foodie/, /snack/, /biryani/, /pizza/, /burger/] },
+  { cat: 'Fashion', strong: [/\bvogue\b/, /\bfdci\b/, /\bcouture\b/, /\brunway\b/, /lakme fashion/], weak: [/fashion/, /\bstyle\b/, /clothing/, /outfit/, /\bwear\b/, /designer/, /\blook\b/, /aesthetic/] },
+  { cat: 'Politics', strong: [/\bmodi\b/, /\brahul gandhi/, /parliament/, /\belection\b/, /prime minister/, /\bpm\b/], weak: [/politic/, /government/, /minister/, /policy/, /\blaw\b/, /president/, /bjp/, /congress/, /aap\b/] },
+  { cat: 'Health', strong: [/transformation/, /mental health/, /\byoga\b/], weak: [/health/, /fitness/, /\bgym\b/, /workout/, /wellness/, /\bdiet\b/, /weight loss/, /meditation/] },
+  { cat: 'Travel', strong: [/\bvisa\b/, /dream destination/], weak: [/travel/, /\btrip\b/, /tourism/, /destination/, /holiday/, /\bflight\b/, /\bhotel\b/, /backpack/, /wanderlust/] },
+  { cat: 'Finance', strong: [/\bsensex\b/, /\bnifty\b/, /\bbitcoin\b/, /\bipo\b/, /stock market/, /rupee/], weak: [/finance/, /crypto/, /economy/, /\bbudget\b/, /invest/, /\btrading\b/, /\bbank\b/] },
+  { cat: 'Meme', strong: [/viral dance/, /\brickroll/, /viral meme/], weak: [/\bmeme\b/, /funny/, /challenge/, /\breel\b/, /\bhumor\b/, /parody/, /\broast\b/, /\blmao\b/, /\blol\b/] },
+  { cat: 'Marketing', strong: [/ad campaign/, /brand collab/, /brand partnership/], weak: [/\bbrand\b/, /campaign/, /advertis/, /\bpromo\b/, /sponsor/, /\bcollab\b/] },
+  { cat: 'Entertainment', strong: [/reality tv/, /netflix original/, /prime video original/], weak: [/netflix/, /disney\+/, /\bshow\b/, /series/, /\bstream\b/, /entertainment/, /celebrity/, /\bkdrama/, /\banime\b/] },
+];
+
 function classifyCategory(name: string, description: string): MomentCategory {
   const text = (name + ' ' + description).toLowerCase();
-  // Order matters: most specific first, broadest last
-  if (/cricket|ipl|football|fifa|tennis|f1|formula|olympic|\bsport\b|match day|tournament|league|nba|nfl|rugby|world cup/.test(text)) return 'Sports';
-  if (/movie|film|cinema|bollywood|hollywood|trailer|oscar|bafta|emmy|cannes|filmfare|box office/.test(text)) return 'Movies';
-  if (/\bmusic\b|song|album|concert|singer|\bartist\b|band\b|tour\b|spotify|grammy|indie|rap\b|\bpop\b/.test(text)) return 'Music';
-  if (/game|gaming|gta|valorant|pubg|esport|playstation|xbox|nintendo|streamer|bgmi/.test(text)) return 'Gaming';
-  if (/\btech\b|\bai\b|startup|software|hardware|gadget|phone|laptop|saas|chatgpt|openai|apple|samsung|google pixel/.test(text)) return 'Tech';
-  if (/food|recipe|restaurant|cuisine|\beat\b|dish|cook|chef|street food|foodie|snack/.test(text)) return 'Food';
-  if (/fashion|style|clothing|outfit|wear|designer|runway|fdci|couture/.test(text)) return 'Fashion';
-  if (/politic|government|election|minister|parliament|policy|\blaw\b|president|\bpm\b|modi/.test(text)) return 'Politics';
-  if (/health|fitness|gym|workout|wellness|mental|yoga|diet|transformation|weight/.test(text)) return 'Health';
-  if (/travel|trip|tourism|destination|holiday|flight|hotel|backpack|\bvisa\b/.test(text)) return 'Travel';
-  if (/finance|stock market|crypto|bitcoin|economy|budget|invest|sensex|nifty|\bipo\b/.test(text)) return 'Finance';
-  if (/meme|funny|viral meme|challenge|viral dance|reel|humor|parody|roast/.test(text)) return 'Meme';
-  if (/\bbrand\b|campaign|advertis|promo|sponsor|collab|partnership/.test(text)) return 'Marketing';
-  if (/netflix|disney|show|series|stream|entertainment|celebrity|reality tv|premiere|release/.test(text)) return 'Entertainment';
-  return 'Entertainment';
+  // Subreddit hint in Reddit descriptions is the single most reliable signal.
+  const subredditMatch = text.match(/r\/([a-z0-9_]+)/i);
+  if (subredditMatch) {
+    const sub = subredditMatch[1].toLowerCase();
+    const subMap: Record<string, MomentCategory> = {
+      cricket: 'Sports', ipl: 'Sports', football: 'Sports', soccer: 'Sports', nba: 'Sports',
+      bollywood: 'Movies', bollywoodnews: 'Movies', movies: 'Movies', films: 'Movies',
+      music: 'Music', hiphopheads: 'Music', indianmusic: 'Music',
+      gaming: 'Gaming', pubgmobile: 'Gaming', valorant: 'Gaming', pcgaming: 'Gaming',
+      technology: 'Tech', india: 'Politics', indiaspeaks: 'Politics', politics: 'Politics',
+      food: 'Food', indianfood: 'Food',
+      fashion: 'Fashion', malefashionadvice: 'Fashion',
+      fitness: 'Health', yoga: 'Health',
+      travel: 'Travel', indiatravel: 'Travel',
+      finance: 'Finance', indianstreetbets: 'Finance', cryptocurrency: 'Finance',
+      memes: 'Meme', dankmemes: 'Meme', indiandankmemes: 'Meme',
+    };
+    if (subMap[sub]) return subMap[sub];
+  }
+
+  const scores = new Map<MomentCategory, number>();
+  for (const { cat, strong, weak } of CATEGORY_KEYWORDS) {
+    let s = 0;
+    for (const re of strong) if (re.test(text)) s += 3;
+    for (const re of weak) if (re.test(text)) s += 1;
+    if (s > 0) scores.set(cat, s);
+  }
+
+  if (scores.size === 0) return 'Entertainment';
+
+  let best: MomentCategory = 'Entertainment';
+  let bestScore = 0;
+  for (const [cat, s] of scores) {
+    if (s > bestScore) { best = cat; bestScore = s; }
+  }
+  return best;
 }
 
 function classifyPriority(score: number): MomentPriority {
