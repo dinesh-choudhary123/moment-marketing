@@ -147,6 +147,30 @@ async function fetchViaXApi(token: string): Promise<Moment[]> {
   return results;
 }
 
+// ─── Wikipedia image lookup ────────────────────────────────────────────────────
+
+async function fetchWikipediaImage(trendName: string): Promise<string | undefined> {
+  try {
+    // Clean: remove #, split CamelCase, strip Twitter operators
+    const query = trendName
+      .replace(/^#/, '')
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .replace(/[_-]/g, ' ')
+      .trim();
+    if (!query || query.length < 3) return undefined;
+
+    const url = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrlimit=1&prop=pageimages&format=json&pithumbsize=800&redirects=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(6_000) });
+    if (!res.ok) return undefined;
+    const data = await res.json() as { query?: { pages?: Record<string, { thumbnail?: { source?: string } }> } };
+    const pages = data.query?.pages ?? {};
+    const page = Object.values(pages)[0];
+    return page?.thumbnail?.source ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ─── Main export ───────────────────────────────────────────────────────────────
 
 export async function fetchTwitterTrends(): Promise<Moment[]> {
@@ -166,19 +190,23 @@ export async function fetchTwitterTrends(): Promise<Moment[]> {
 
   if (allTrends.length > 0) {
     const now = new Date().toISOString();
-    const moments = allTrends.slice(0, 60).map(trend => {
-      // Rank 1 = 100 score, rank 50 = 60 score
+    const top = allTrends.slice(0, 60);
+
+    // Fetch Wikipedia images in parallel (batches of 10 to avoid rate limits)
+    const wikiImages: Array<string | undefined> = [];
+    for (let i = 0; i < top.length; i += 10) {
+      const batch = top.slice(i, i + 10);
+      const results = await Promise.all(batch.map(t => fetchWikipediaImage(t.name)));
+      wikiImages.push(...results);
+    }
+
+    const moments = top.map((trend, idx) => {
       const trendingScore = Math.max(60, 100 - (trend.rank - 1) * 0.8);
+      const description = `Trending on Twitter India • Rank #${trend.rank}`;
 
-      const description = `Trending on Twitter India • Rank #${trend.rank} • ${trend.twitterSearchUrl}`;
-
-      // Build a relevant search keyword for Unsplash by stripping # and camelCase-splitting
-      const cleanKeyword = trend.name
-        .replace(/^#/, '')
-        .replace(/([a-z])([A-Z])/g, '$1 $2') // CamelCase → words
-        .replace(/[_-]/g, ' ')
-        .trim();
-      const imageUrl = `https://source.unsplash.com/featured/800x450/?${encodeURIComponent(cleanKeyword)}`;
+      const cleanKeyword = trend.name.replace(/^#/, '').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]/g, ' ').trim();
+      // Wikipedia real photo first; fall back to Unsplash source with clean keyword
+      const imageUrl = wikiImages[idx] ?? `https://source.unsplash.com/featured/800x450/?${encodeURIComponent(cleanKeyword)}`;
 
       return classifyTrend({
         name: trend.name,

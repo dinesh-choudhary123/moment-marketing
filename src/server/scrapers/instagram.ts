@@ -323,12 +323,42 @@ async function fetchViaApify(token: string): Promise<Moment[]> {
 
   const moments: Moment[] = [];
   const batch = viral.slice(0, 80);
+
+  // Try to download and cache the post image locally. Instagram CDN URLs expire,
+  // so we also prepare Wikipedia-based fallbacks for known celebrity accounts.
   const imageResults = await Promise.allSettled(
     batch.map(post => {
       const code = post.shortCode ?? post.id?.toString() ?? 'unknown';
-      return cacheInstagramImage(post.displayUrl, code);
+      // Try displayUrl first; also try images[0] as second source
+      const imgUrl = post.displayUrl ?? post.images?.[0];
+      return cacheInstagramImage(imgUrl, code);
     }),
   );
+
+  // Wikipedia lookup keyed by ownerUsername (username → clean name)
+  const usernameToWikiQuery: Record<string, string> = {
+    'virat.kohli': 'Virat Kohli', 'narendramodi': 'Narendra Modi',
+    'shahrukhkhan': 'Shah Rukh Khan', 'iplt20': 'Indian Premier League',
+    'ndtv': 'NDTV', 'bollywood': 'Bollywood', 'cristiano': 'Cristiano Ronaldo',
+    'zomato': 'Zomato', 'myntra': 'Myntra', 'pinkvilla': 'Pinkvilla',
+  };
+
+  // Pre-fetch Wikipedia images for known accounts (parallel, capped)
+  const knownAccounts = [...new Set(batch.map(p => p.ownerUsername ?? '').filter(u => usernameToWikiQuery[u]))];
+  const wikiCache = new Map<string, string | undefined>();
+  await Promise.all(knownAccounts.map(async username => {
+    const q = usernameToWikiQuery[username];
+    if (!q) return;
+    try {
+      const url = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(q)}&gsrlimit=1&prop=pageimages&format=json&pithumbsize=800&redirects=1`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(6_000) });
+      if (!res.ok) return;
+      const data = await res.json() as { query?: { pages?: Record<string, { thumbnail?: { source?: string } }> } };
+      const pages = data.query?.pages ?? {};
+      const img = Object.values(pages)[0]?.thumbnail?.source;
+      if (img) wikiCache.set(username, img);
+    } catch { /* skip */ }
+  }));
 
   for (let i = 0; i < batch.length; i++) {
     const post = batch[i];
@@ -341,13 +371,12 @@ async function fetchViaApify(token: string): Promise<Moment[]> {
     const hashtagsText = post.hashtags?.slice(0, 3).map(h => `#${h}`).join(' ') ?? '';
     const name = caption.slice(0, 100) || 'Instagram Trending Post';
 
+    // Priority: locally-cached post image → Wikipedia person photo → category fallback
     let imageUrl: string;
     const imgResult = imageResults[i];
-    if (imgResult.status === 'fulfilled' && imgResult.value) {
-      imageUrl = imgResult.value;
-    } else {
-      imageUrl = getCategoryFallbackImage(post.ownerUsername ?? '', name + ' ' + (post.hashtags?.join(' ') ?? ''));
-    }
+    const cachedLocal = imgResult.status === 'fulfilled' ? imgResult.value : undefined;
+    const wikiImg = wikiCache.get(post.ownerUsername ?? '');
+    imageUrl = cachedLocal ?? wikiImg ?? getCategoryFallbackImage(post.ownerUsername ?? '', name + ' ' + (post.hashtags?.join(' ') ?? ''));
 
     const moment = classifyTrend({
       name,
