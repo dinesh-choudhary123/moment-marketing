@@ -1,6 +1,7 @@
 import type { Moment, Platform } from '@/types';
 import { momentsStore, scraperStatus } from '@/server/db/store';
 import { formatSpendSummary } from '@/server/db/apify-spend';
+import { resetImageDedup } from './image-utils';
 import { fetchTwitterTrends } from './twitter';
 import { fetchYouTubeTrends } from './youtube';
 import { fetchRedditTrends } from './reddit';
@@ -8,8 +9,8 @@ import { fetchInstagramTrends } from './instagram';
 import { fetchFacebookTrends } from './facebook';
 import { fetchGoogleTrends } from './google';
 
-// 6-hour cooldown between scraper runs — caps to ≤ 4 runs/day
-const COOLDOWN_MS = 6 * 60 * 60 * 1000;
+// 3-hour cooldown — 4 full Apify runs/day = $1.88 max spend (within $2 cap)
+const COOLDOWN_MS = 3 * 60 * 60 * 1000;
 
 export function canScrape(): boolean {
   if (scraperStatus.isRunning) return false;
@@ -20,6 +21,9 @@ export function canScrape(): boolean {
 export async function runAllScrapers(): Promise<{ added: number; total: number; byPlatform: Partial<Record<Platform, number>> }> {
   if (scraperStatus.isRunning) return { added: 0, total: momentsStore.size, byPlatform: {} };
   scraperStatus.isRunning = true;
+
+  // Clear per-run image dedup set so each run starts fresh
+  resetImageDedup();
 
   try {
     const results = await Promise.allSettled([

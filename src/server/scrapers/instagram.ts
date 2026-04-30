@@ -1,40 +1,62 @@
 import type { Moment } from '@/types';
 import { classifyTrend } from './classifier';
 import { reserveCall, commitActual, releaseReservation } from '@/server/db/apify-spend';
-import { writeFile, mkdir } from 'fs/promises';
-import { existsSync } from 'fs';
-import { join } from 'path';
+import { fetchTopicImage } from './image-utils';
 
-// ─── Apify Config ────────────────────────────────────────────────────────────
+// ─── Instagram scraper ────────────────────────────────────────────────────────
+//
+// Scraping chain (each level is tried in order, falls to next on failure):
+//
+//   1. apify/instagram-scraper  with searchHashtags  ← trending hashtag posts
+//   2. apify/instagram-scraper  with directUrls      ← top Indian profiles
+//   3. Google Trends India RSS                       ← free, always-on fallback
+//
+// Both Apify paths use the SAME actor (`apify/instagram-scraper`) which is the
+// official, most stable Apify actor for Instagram. Using one actor avoids actor-
+// existence uncertainty. The only difference is the input object.
+
 const APIFY_BASE = 'https://api.apify.com/v2';
-const VIRAL_LIKES_THRESHOLD = 1_000;
-const VIRAL_VIEWS_THRESHOLD = 5_000;
-// Only keep posts made within the last 48 hours — "trending NOW" signal.
-const FRESHNESS_WINDOW_MS = 48 * 60 * 60 * 1000;
-// Cost-safe defaults — 10 profiles × 8 posts/profile = ~80 items → ~$0.18 / run
-const DEFAULT_RESULTS_LIMIT = 8;
 
-// Top 10 high-signal Indian + global accounts (trimmed from 26 for cost control)
-const TARGET_PROFILES = [
-  'https://www.instagram.com/virat.kohli/',
-  'https://www.instagram.com/narendramodi/',
-  'https://www.instagram.com/shahrukhkhan/',
-  'https://www.instagram.com/bollywood/',
-  'https://www.instagram.com/iplt20/',
-  'https://www.instagram.com/ndtv/',
-  'https://www.instagram.com/pinkvilla/',
-  'https://www.instagram.com/cristiano/',
-  'https://www.instagram.com/zomato/',
-  'https://www.instagram.com/myntra/',
+// Keep posts up to 7 days old — Instagram trends often stay hot for many days.
+// If timestamp field is ABSENT, posts are INCLUDED (don't silently drop them).
+const FRESHNESS_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Seed hashtags — used when Google Trends returns nothing or all non-Latin.
+// These always have fresh posts on Instagram.
+const SEED_HASHTAGS = [
+  'ipl', 'ipl2026', 'cricket', 'bollywood', 'india', 'trending',
+  'viral', 'reels', 'indianews', 'entertainment', 'music', 'fashion',
+  'food', 'travel', 'sports', 'technology',
 ];
 
-function isFresh(iso: string | number | undefined): boolean {
-  if (!iso) return false;
-  const t = typeof iso === 'number' ? iso * 1000 : new Date(iso).getTime();
-  if (isNaN(t)) return false;
-  return Date.now() - t <= FRESHNESS_WINDOW_MS;
-}
+// 20 high-reach Indian accounts across sports, Bollywood, news, brands
+const PROFILE_URLS = [
+  'https://www.instagram.com/virat.kohli/',
+  'https://www.instagram.com/iplt20/',
+  'https://www.instagram.com/bcci/',
+  'https://www.instagram.com/shahrukhkhan/',
+  'https://www.instagram.com/bollywood/',
+  'https://www.instagram.com/pinkvilla/',
+  'https://www.instagram.com/narendramodi/',
+  'https://www.instagram.com/ndtv/',
+  'https://www.instagram.com/aajtak/',
+  'https://www.instagram.com/zomato/',
+  'https://www.instagram.com/myntra/',
+  'https://www.instagram.com/viralbhayani/',
+  'https://www.instagram.com/natgeo/',
+  'https://www.instagram.com/nasa/',
+  'https://www.instagram.com/bbcnews/',
+  'https://www.instagram.com/cristiano/',
+  'https://www.instagram.com/timesnow/',
+  'https://www.instagram.com/anushkasharma/',
+  'https://www.instagram.com/janhvikapoor/',
+  'https://www.instagram.com/saraalikhan95/',
+];
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+// Field names that different versions of apify/instagram-scraper use for the
+// same data. We check all of them so nothing is silently dropped.
 interface InstagramPost {
   id?: string;
   shortCode?: string;
@@ -49,117 +71,224 @@ interface InstagramPost {
   videoViewCount?: number;
   ownerUsername?: string;
   ownerFullName?: string;
+  ownerFollowersCount?: number; // follower count — used for engagement rate normalisation
+  ownerVideoViewCount?: number;
   type?: string;
-  timestamp?: string;
-  alt?: string;
+  // Multiple possible timestamp field names across actor versions:
+  timestamp?: string;           // ISO string — most common
+  takenAtTimestamp?: number;    // Unix seconds — older actor versions
+  createdAt?: string;           // Alternative ISO field name
+  taken_at?: number;            // Yet another variant (Unix seconds)
 }
-
-// ─── Image downloading & caching ─────────────────────────────────────────────
-const IMAGE_CACHE_DIR = join(process.cwd(), 'public', 'images', 'ig');
-
-async function ensureCacheDir(): Promise<void> {
-  if (!existsSync(IMAGE_CACHE_DIR)) {
-    await mkdir(IMAGE_CACHE_DIR, { recursive: true });
-  }
-}
-
-async function cacheInstagramImage(
-  displayUrl: string | undefined,
-  shortCode: string,
-): Promise<string | undefined> {
-  if (!displayUrl) return undefined;
-
-  const filename = `${shortCode}.jpg`;
-  const localPath = join(IMAGE_CACHE_DIR, filename);
-  const publicPath = `/images/ig/${filename}`;
-
-  if (existsSync(localPath)) return publicPath;
-
-  try {
-    await ensureCacheDir();
-    const res = await fetch(displayUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!res.ok) return `/api/image-proxy?url=${encodeURIComponent(displayUrl)}`;
-    const contentType = res.headers.get('content-type') ?? '';
-    if (!contentType.startsWith('image/')) return `/api/image-proxy?url=${encodeURIComponent(displayUrl)}`;
-    const buffer = Buffer.from(await res.arrayBuffer());
-    await writeFile(localPath, buffer);
-    console.log(`[Instagram] Cached image: ${publicPath} (${(buffer.length / 1024).toFixed(0)}KB)`);
-    return publicPath;
-  } catch {
-    return `/api/image-proxy?url=${encodeURIComponent(displayUrl)}`;
-  }
-}
-
-// ─── Category fallback images (Unsplash) ─────────────────────────────────────
-const CATEGORY_IMAGES: Record<string, string> = {
-  Sports: 'https://images.unsplash.com/photo-1540747913346-19212a4b423f?w=800&auto=format&fit=crop',
-  Movies: 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=800&auto=format&fit=crop',
-  Meme: 'https://images.unsplash.com/photo-1516251193007-45ef944ab0c6?w=800&auto=format&fit=crop',
-  Fashion: 'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=800&auto=format&fit=crop',
-  Food: 'https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=800&auto=format&fit=crop',
-  Travel: 'https://images.unsplash.com/photo-1524492412937-b28074a5d7da?w=800&auto=format&fit=crop',
-  Health: 'https://images.unsplash.com/photo-1571019614242-c5c5dee9f50b?w=800&auto=format&fit=crop',
-  Tech: 'https://images.unsplash.com/photo-1519389950473-47ba0277781c?w=800&auto=format&fit=crop',
-  Music: 'https://images.unsplash.com/photo-1540039155733-5bb30b53aa14?w=800&auto=format&fit=crop',
-  Entertainment: 'https://images.unsplash.com/photo-1485846234645-a62644f84728?w=800&auto=format&fit=crop',
-  Marketing: 'https://images.unsplash.com/photo-1552664730-d307ca884978?w=800&auto=format&fit=crop',
-  Finance: 'https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&auto=format&fit=crop',
-  Gaming: 'https://images.unsplash.com/photo-1552820728-8b83bb6b773f?w=800&auto=format&fit=crop',
-  Politics: 'https://images.unsplash.com/photo-1529107386315-e1a2ed48a620?w=800&auto=format&fit=crop',
-};
-
-function getCategoryFallbackImage(usernameOrTag: string, contentText: string): string {
-  const text = (usernameOrTag + ' ' + contentText).toLowerCase();
-  if (/virat\.kohli|mumbaiindians|chennaiipl|iplt20/.test(text)) return CATEGORY_IMAGES.Sports;
-  if (/leomessi|cristiano|therock/.test(text)) return CATEGORY_IMAGES.Sports;
-  if (/shahrukhkhan|aliaabhatt|deepikapadukone|ranveersingh|katrinakaif|priyankachopra/.test(text)) return CATEGORY_IMAGES.Movies;
-  if (/bollywood|filmfare|pinkvilla|bollywoodhungama|zoomtv/.test(text)) return CATEGORY_IMAGES.Movies;
-  if (/politic|election|minister|government|modi|bjp|congress/.test(text)) return CATEGORY_IMAGES.Politics;
-  if (/cricket|ipl|sport|football|tennis|match|score|team|fifa|league|wpl|bcci/.test(text)) return CATEGORY_IMAGES.Sports;
-  if (/bollywood|film|movie|cinema|actor|actress|release|trailer|ott|netflix|prime/.test(text)) return CATEGORY_IMAGES.Movies;
-  if (/fashion|style|outfit|wear|designer|runway|couture|saree|kurta/.test(text)) return CATEGORY_IMAGES.Fashion;
-  if (/food|recipe|cook|eat|dish|restaurant|biryani|chai|dosa|street food/.test(text)) return CATEGORY_IMAGES.Food;
-  if (/travel|trip|tourism|destination|hill station|beach|temple|holiday/.test(text)) return CATEGORY_IMAGES.Travel;
-  if (/fitness|gym|workout|health|yoga|diet|weight|run|marathon/.test(text)) return CATEGORY_IMAGES.Health;
-  if (/tech|ai|startup|gadget|phone|app|software|iphone|samsung|isro/.test(text)) return CATEGORY_IMAGES.Tech;
-  if (/music|song|concert|album|singer|rapper|dj|spotify|gaana|wynk/.test(text)) return CATEGORY_IMAGES.Music;
-  if (/meme|funny|viral|reel|comedy|lol|humour|roast/.test(text)) return CATEGORY_IMAGES.Meme;
-  if (/finance|stock|market|crypto|bitcoin|sensex|nifty|economy|rbi/.test(text)) return CATEGORY_IMAGES.Finance;
-  if (/game|gaming|esport|pubg|valorant|bgmi|freefire/.test(text)) return CATEGORY_IMAGES.Gaming;
-  return CATEGORY_IMAGES.Entertainment;
-}
-
-// ─── Real-time fallback: Google Trends India ─────────────────────────────────
-// Fetches what's ACTUALLY trending in India RIGHT NOW — no API key needed,
-// updates every hour from Google's own trending search data.
 
 interface TrendingTopic {
   name: string;
   traffic?: number;
   relatedNews?: string[];
+  imageUrl?: string;
 }
 
-// Detect if a string is mostly non-Latin (Hindi/Telugu/Kannada etc.)
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Extract whichever timestamp field is present across different actor versions. */
+function getTimestamp(p: InstagramPost): string | number | undefined {
+  return p.timestamp ?? p.createdAt ?? p.takenAtTimestamp ?? p.taken_at;
+}
+
+function isFresh(ts: string | number | undefined): boolean {
+  if (!ts) return true; // ← CRITICAL FIX: no timestamp = assume recent, do NOT drop
+  const t = typeof ts === 'number'
+    ? (ts > 1e10 ? ts : ts * 1000) // handle both ms and seconds
+    : new Date(ts).getTime();
+  if (isNaN(t)) return true; // unparseable = assume recent
+  return Date.now() - t <= FRESHNESS_WINDOW_MS;
+}
+
 function isNonLatinScript(text: string): boolean {
   const nonLatinCount = (text.match(/[^\x00-\x7F]/g) ?? []).length;
   return nonLatinCount > text.length * 0.4;
 }
 
-async function fetchGoogleTrendsIndia(): Promise<TrendingTopic[]> {
+function toHashtag(name: string): string {
+  return name
+    .replace(/^#/, '')
+    .replace(/[^\w\s]/g, '')
+    .replace(/\s+/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+/** Filter raw posts: remove old/duplicate, keep everything else. */
+function filterPosts(posts: InstagramPost[]): InstagramPost[] {
+  const seen = new Set<string>();
+  return posts.filter(p => {
+    // Must have some content (caption OR image URL)
+    const hasContent = !!(p.caption || p.displayUrl || p.images?.length || p.videoUrl);
+    if (!hasContent) return false;
+
+    // Freshness — only drop posts confirmed to be OLD.
+    // If timestamp is ABSENT: include the post (don't silently discard).
+    const ts = getTimestamp(p);
+    if (!isFresh(ts)) return false;
+
+    // Deduplicate
+    const key = p.shortCode ?? p.id ?? p.caption?.slice(0, 60) ?? '';
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** Compute engagement-rate-normalised trending score — removes follower-count bias. */
+function computeScore(post: InstagramPost): number {
+  const likes = post.likesCount ?? 0;
+  const comments = post.commentsCount ?? 0;
+  const views = post.videoViewCount ?? 0;
+  const followers = post.ownerFollowersCount ?? 0;
+  const isVideo = views > 0 || post.type === 'Video';
+
+  if (followers >= 1000 && (likes + comments > 0)) {
+    // Engagement rate = (likes + comments×5) / followers
+    // Removes bias: a 5% engagement rate on 10K followers beats 0.1% on 10M followers.
+    // 1% → 60, 5% → 80, 10%+ → 100
+    const engRate = (likes + comments * 5) / followers;
+    return Math.min(100, 55 + Math.floor(engRate * 500));
+  }
+
+  if (isVideo && views > 0) {
+    // No follower data but has views — use view velocity proxy
+    return Math.min(100, 50 + Math.floor(Math.log10(views + 1) * 7));
+  }
+
+  // Fallback: raw engagement as weak signal
+  const rawEng = likes + comments * 5;
+  return Math.min(100, 50 + Math.floor(Math.log10(rawEng + 1) * 6));
+}
+
+/** Sort posts by engagement rate so high-rate smaller creators surface above celebrities. */
+function sortByEngagementRate(posts: InstagramPost[]): InstagramPost[] {
+  return posts.slice().sort((a, b) => {
+    const followersA = a.ownerFollowersCount ?? 0;
+    const followersB = b.ownerFollowersCount ?? 0;
+    const rateA = followersA > 500
+      ? ((a.likesCount ?? 0) + (a.commentsCount ?? 0) * 5) / followersA
+      : 0;
+    const rateB = followersB > 500
+      ? ((b.likesCount ?? 0) + (b.commentsCount ?? 0) * 5) / followersB
+      : 0;
+    return rateB - rateA;
+  });
+}
+
+function postToMoment(post: InstagramPost, imageUrl: string | undefined): Moment | null {
+  const score = computeScore(post);
+  const caption = (post.caption ?? '').replace(/\n+/g, ' ').trim();
+  const hashtagsText = (post.hashtags ?? []).slice(0, 3).map(h => `#${h}`).join(' ');
+  const owner = post.ownerUsername ?? post.ownerFullName ?? 'instagram';
+
+  // Description: actual caption text (stripped of hashtags for readability)
+  const captionSnippet = caption.replace(/#\S+/g, '').replace(/\s+/g, ' ').trim();
+  const description = captionSnippet.length > 10
+    ? `${captionSnippet.slice(0, 150)}${captionSnippet.length > 150 ? '…' : ''}`
+    : `@${owner}${hashtagsText ? ` • ${hashtagsText}` : ''}`;
+
+  const ts = getTimestamp(post);
+
+  return classifyTrend({
+    name: (caption || `@${owner} on Instagram`).slice(0, 100),
+    description,
+    imageUrl,
+    trendingScore: score,
+    platform: 'Instagram',
+    originDate: typeof ts === 'number'
+      ? new Date(ts > 1e10 ? ts : ts * 1000).toISOString()
+      : (ts as string | undefined),
+  });
+}
+
+async function postsToMoments(posts: InstagramPost[]): Promise<Moment[]> {
+  // Sort by engagement rate first so viral small-creator posts surface above celebrities
+  const sorted = sortByEngagementRate(filterPosts(posts));
+
+  // Resolve images in parallel (batch 10) — use caption text as keyword for relevance
+  const imageUrls: Array<string | undefined> = [];
+  for (let i = 0; i < sorted.length; i += 10) {
+    const batch = sorted.slice(i, i + 10);
+    const batchImages = await Promise.all(
+      batch.map(p => {
+        const caption = (p.caption ?? '').replace(/#\S+/g, '').replace(/\n/g, ' ').trim();
+        const hashtags = (p.hashtags ?? []).slice(0, 2).join(' ');
+        const keyword = caption.slice(0, 80) || hashtags || 'instagram trending india';
+        return fetchTopicImage(keyword);
+      }),
+    );
+    imageUrls.push(...batchImages);
+  }
+
+  return sorted
+    .map((post, idx) => postToMoment(post, imageUrls[idx]))
+    .filter((m): m is NonNullable<typeof m> => m !== null);
+}
+
+// ─── Apify helper ─────────────────────────────────────────────────────────────
+
+async function runInstagramScraper(
+  token: string,
+  input: Record<string, unknown>,
+  label: string,
+  reservedItems: number,
+  minItems = 10,
+): Promise<InstagramPost[]> {
+  const reservation = await reserveCall('apify/instagram-scraper', reservedItems, minItems);
+  if (!reservation) {
+    console.warn(`[Instagram] ${label}: Apify budget exhausted`);
+    return [];
+  }
+
+  console.log(`[Instagram] ${label}: running (budget reserved: $${reservation.reservedUsd.toFixed(3)})...`);
+
+  let posts: InstagramPost[] = [];
   try {
     const res = await fetch(
-      'https://trends.google.com/trending/rss?geo=IN',
+      `${APIFY_BASE}/acts/apify~instagram-scraper/run-sync-get-dataset-items?timeout=300&format=json`,
       {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          Accept: 'application/rss+xml, application/xml, text/xml, */*',
-        },
-        signal: AbortSignal.timeout(8000),
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...input, maxRequestRetries: 3 }),
+        signal: AbortSignal.timeout(310_000),
       },
     );
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`[Instagram] ${label} error ${res.status}:`, text.slice(0, 300));
+      await releaseReservation(reservation);
+      return [];
+    }
+
+    posts = (await res.json()) as InstagramPost[];
+  } catch (e) {
+    console.error(`[Instagram] ${label} failed:`, e);
+    await releaseReservation(reservation);
+    return [];
+  }
+
+  await commitActual(reservation, posts.length);
+  console.log(`[Instagram] ${label} → ${posts.length} raw posts`);
+  return posts;
+}
+
+// ─── Google Trends RSS seed ───────────────────────────────────────────────────
+
+async function fetchGoogleTrendsIndia(): Promise<TrendingTopic[]> {
+  try {
+    const res = await fetch('https://trends.google.com/trending/rss?geo=IN', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        Accept: 'application/rss+xml, application/xml, text/xml, */*',
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
     if (!res.ok) {
       console.warn(`[Instagram] Google Trends returned ${res.status}`);
       return [];
@@ -169,18 +298,13 @@ async function fetchGoogleTrendsIndia(): Promise<TrendingTopic[]> {
     const itemBlocks = xml.match(/<item>([\s\S]*?)<\/item>/gi) ?? [];
     const topics: TrendingTopic[] = [];
 
-    for (const block of itemBlocks.slice(0, 25)) {
+    for (const block of itemBlocks.slice(0, 50)) {
       const titleMatch = block.match(/<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/i);
       const title = titleMatch?.[1]
         ?.trim()
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&#39;/g, "'");
-
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'");
       if (!title || title === 'Daily Search Trends' || title.length < 3) continue;
 
-      // Parse approximate traffic volume (e.g., "200K+")
       const trafficRaw = block.match(/<ht:approx_traffic>(.*?)<\/ht:approx_traffic>/i)?.[1] ?? '';
       let traffic: number | undefined;
       if (trafficRaw) {
@@ -190,30 +314,34 @@ async function fetchGoogleTrendsIndia(): Promise<TrendingTopic[]> {
         else traffic = parseInt(cleaned.replace(/,/g, ''), 10) || undefined;
       }
 
-      // Extract related news headlines — prefer English ones for UI readability
       const newsBlocks = block.match(/<ht:news_item>([\s\S]*?)<\/ht:news_item>/gi) ?? [];
-      const relatedNews = newsBlocks.map(nb => {
-        const t = nb.match(/<ht:news_item_title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/ht:news_item_title>/i)?.[1]?.trim() ?? '';
-        return t.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
-      }).filter(Boolean);
+      const relatedNews = newsBlocks
+        .map(nb =>
+          (nb.match(/<ht:news_item_title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/ht:news_item_title>/i)?.[1]?.trim() ?? '')
+            .replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"'),
+        )
+        .filter(Boolean);
 
-      // If the topic title is in non-Latin script (Hindi/Telugu/Kannada),
-      // prefer an English news headline as the display name — but never skip the topic.
       let displayName = title;
       if (isNonLatinScript(title)) {
-        const englishHeadline = relatedNews.find(n => !isNonLatinScript(n) && n.length > 5);
-        if (englishHeadline) {
-          // Use the English news headline (truncated) as the topic name
-          displayName = englishHeadline.slice(0, 80);
-        }
-        // If no English headline, keep original title — it still represents a real trend
+        const eng = relatedNews.find(n => !isNonLatinScript(n) && n.length > 5);
+        if (eng) displayName = eng.slice(0, 80);
       }
 
-      const englishNews = relatedNews.filter(n => !isNonLatinScript(n));
-      topics.push({ name: displayName, traffic, relatedNews: englishNews });
+      const picMatch =
+        block.match(/<ht:picture[^>]*>([^<]+)<\/ht:picture>/i) ??
+        block.match(/<ht:news_item_picture[^>]*>([^<]+)<\/ht:news_item_picture>/i);
+      const rssImageUrl = picMatch?.[1]?.trim() || undefined;
+
+      topics.push({
+        name: displayName,
+        traffic,
+        relatedNews: relatedNews.filter(n => !isNonLatinScript(n)),
+        imageUrl: rssImageUrl,
+      });
     }
 
-    console.log(`[Instagram] Google Trends IN: ${topics.length} live trending topics`);
+    console.log(`[Instagram] Google Trends India: ${topics.length} topics`);
     return topics;
   } catch (e) {
     console.warn('[Instagram] Google Trends fetch error:', e);
@@ -221,325 +349,156 @@ async function fetchGoogleTrendsIndia(): Promise<TrendingTopic[]> {
   }
 }
 
-// Also query Instagram's public search endpoint to get post counts for topics
-async function getInstagramHashtagCount(query: string): Promise<number | undefined> {
-  try {
-    const res = await fetch(
-      `https://www.instagram.com/web/search/topsearch/?query=${encodeURIComponent(query)}&context=hashtag`,
-      {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
-          Accept: 'application/json',
-          'X-IG-App-ID': '936619743392459',
-        },
-        signal: AbortSignal.timeout(4000),
-      },
+// ─── Google Trends fallback → moments ─────────────────────────────────────────
+
+async function googleTrendsToMoments(topics: TrendingTopic[]): Promise<Moment[]> {
+  if (topics.length === 0) return [];
+
+  const imageUrls: Array<string | undefined> = [];
+  for (let i = 0; i < topics.length; i += 10) {
+    const batch = topics.slice(i, i + 10);
+    const imgs = await Promise.all(
+      batch.map(t =>
+        t.imageUrl && t.imageUrl.startsWith('http')
+          ? Promise.resolve(t.imageUrl)
+          : fetchTopicImage(t.name),
+      ),
     );
-    if (!res.ok) return undefined;
-    const ct = res.headers.get('content-type') ?? '';
-    if (!ct.includes('json')) return undefined;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const data = await res.json() as any;
-    return data?.hashtags?.[0]?.hashtag?.media_count as number | undefined;
-  } catch {
-    return undefined;
+    imageUrls.push(...imgs);
   }
-}
-
-// ─── Apify primary path ───────────────────────────────────────────────────────
-
-async function fetchViaApify(token: string): Promise<Moment[]> {
-  // Pre-reserve budget atomically — blocks concurrent refreshes from double-spending.
-  const reservation = await reserveCall('apify/instagram-scraper', DEFAULT_RESULTS_LIMIT * TARGET_PROFILES.length, 20);
-  if (!reservation) {
-    console.warn('[Instagram] Daily Apify $2 cap reached — falling back to Google Trends');
-    return [];
-  }
-  const perProfileLimit = Math.max(1, Math.floor(reservation.safeLimit / TARGET_PROFILES.length));
-
-  console.log(`[Instagram] Apify: live scrape via run-sync-get-dataset-items (resultsLimit=${perProfileLimit}/profile) ...`);
-
-  let posts: InstagramPost[] = [];
-  try {
-    const res = await fetch(
-      `${APIFY_BASE}/acts/apify~instagram-scraper/run-sync-get-dataset-items?timeout=300&format=json`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          directUrls: TARGET_PROFILES,
-          resultsType: 'posts',
-          resultsLimit: perProfileLimit,
-          addParentData: false,
-          searchType: 'user',
-          searchLimit: 1,
-        }),
-        signal: AbortSignal.timeout(310_000),
-      },
-    );
-
-    if (!res.ok) {
-      const text = await res.text();
-      console.error(`[Instagram] Apify run error ${res.status}:`, text.slice(0, 300));
-      await releaseReservation(reservation);
-      return [];
-    }
-
-    posts = (await res.json()) as InstagramPost[];
-  } catch (e) {
-    console.error('[Instagram] Apify fetch failed:', e);
-    await releaseReservation(reservation);
-    return [];
-  }
-
-  // Reconcile actual spend against reservation
-  await commitActual(reservation, posts.length);
-  if (posts.length === 0) return [];
-
-  const seen = new Set<string>();
-  const viral = posts
-    .filter(p => {
-      if (!p.caption && !p.displayUrl) return false;
-      // Freshness — only posts < 48h old count as "trending now"
-      if (!isFresh(p.timestamp)) return false;
-      const likes = p.likesCount ?? 0;
-      const views = p.videoViewCount ?? 0;
-      if (likes < VIRAL_LIKES_THRESHOLD && views < VIRAL_VIEWS_THRESHOLD) return false;
-      const key = p.shortCode ?? p.id?.toString() ?? p.caption?.slice(0, 50) ?? '';
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .sort((a, b) => {
-      const aScore = (a.likesCount ?? 0) + (a.videoViewCount ?? 0) / 10;
-      const bScore = (b.likesCount ?? 0) + (b.videoViewCount ?? 0) / 10;
-      return bScore - aScore;
-    });
-
-  console.log(`[Instagram] Apify: ${viral.length} fresh-viral posts (< 48h, ≥${VIRAL_LIKES_THRESHOLD.toLocaleString()} likes or ≥${VIRAL_VIEWS_THRESHOLD.toLocaleString()} views) from ${posts.length} total`);
 
   const moments: Moment[] = [];
-  const batch = viral.slice(0, 80);
-
-  // Try to download and cache the post image locally. Instagram CDN URLs expire,
-  // so we also prepare Wikipedia-based fallbacks for known celebrity accounts.
-  const imageResults = await Promise.allSettled(
-    batch.map(post => {
-      const code = post.shortCode ?? post.id?.toString() ?? 'unknown';
-      // Try displayUrl first; also try images[0] as second source
-      const imgUrl = post.displayUrl ?? post.images?.[0];
-      return cacheInstagramImage(imgUrl, code);
-    }),
-  );
-
-  // Wikipedia lookup keyed by ownerUsername (username → clean name)
-  const usernameToWikiQuery: Record<string, string> = {
-    'virat.kohli': 'Virat Kohli', 'narendramodi': 'Narendra Modi',
-    'shahrukhkhan': 'Shah Rukh Khan', 'iplt20': 'Indian Premier League',
-    'ndtv': 'NDTV', 'bollywood': 'Bollywood', 'cristiano': 'Cristiano Ronaldo',
-    'zomato': 'Zomato', 'myntra': 'Myntra', 'pinkvilla': 'Pinkvilla',
-  };
-
-  // Pre-fetch Wikipedia images for known accounts (parallel, capped)
-  const knownAccounts = [...new Set(batch.map(p => p.ownerUsername ?? '').filter(u => usernameToWikiQuery[u]))];
-  const wikiCache = new Map<string, string | undefined>();
-  await Promise.all(knownAccounts.map(async username => {
-    const q = usernameToWikiQuery[username];
-    if (!q) return;
-    try {
-      const url = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(q)}&gsrlimit=1&prop=pageimages&format=json&pithumbsize=800&redirects=1`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(6_000) });
-      if (!res.ok) return;
-      const data = await res.json() as { query?: { pages?: Record<string, { thumbnail?: { source?: string } }> } };
-      const pages = data.query?.pages ?? {};
-      const img = Object.values(pages)[0]?.thumbnail?.source;
-      if (img) wikiCache.set(username, img);
-    } catch { /* skip */ }
-  }));
-
-  for (let i = 0; i < batch.length; i++) {
-    const post = batch[i];
-    const likes = post.likesCount ?? 0;
-    const comments = post.commentsCount ?? 0;
-    const views = post.videoViewCount ?? 0;
-    const engagement = likes + comments * 5 + views;
-    const score = Math.min(100, 55 + Math.floor(Math.log10(engagement + 1) * 7));
-    const caption = (post.caption ?? 'Instagram Trend').replace(/\n+/g, ' ').trim();
-    const hashtagsText = post.hashtags?.slice(0, 3).map(h => `#${h}`).join(' ') ?? '';
-    const name = caption.slice(0, 100) || 'Instagram Trending Post';
-
-    // Priority: locally-cached post image → Wikipedia person photo → category fallback
-    let imageUrl: string;
-    const imgResult = imageResults[i];
-    const cachedLocal = imgResult.status === 'fulfilled' ? imgResult.value : undefined;
-    const wikiImg = wikiCache.get(post.ownerUsername ?? '');
-    imageUrl = cachedLocal ?? wikiImg ?? getCategoryFallbackImage(post.ownerUsername ?? '', name + ' ' + (post.hashtags?.join(' ') ?? ''));
-
-    const moment = classifyTrend({
-      name,
-      description: `@${post.ownerUsername ?? 'instagram'} • ${likes.toLocaleString()} likes • ${comments.toLocaleString()} comments${hashtagsText ? ` • ${hashtagsText}` : ''}`,
-      imageUrl,
-      trendingScore: score,
-      platform: 'Instagram',
-      originDate: post.timestamp,
-    });
-    if (moment) moments.push(moment);
-  }
-
-  return moments;
-}
-
-// ─── Additional source: Twitter API trending queries (uses existing bearer token) ─
-// Fetches trending Indian content from Twitter to supplement Instagram moments.
-async function fetchTwitterTrendingTopics(): Promise<TrendingTopic[]> {
-  const token = process.env.TWITTER_BEARER_TOKEN;
-  if (!token) return [];
-
-  const INDIA_QUERIES = [
-    'IPL 2025 trending', 'Bollywood viral today', 'India cricket latest',
-    'trending India today', 'viral reel India', 'India news trending',
-  ];
-
-  try {
-    const results = await Promise.allSettled(
-      INDIA_QUERIES.slice(0, 4).map(async q => {
-        const url = new URL('https://api.twitter.com/2/tweets/search/recent');
-        url.searchParams.set('query', `${q} lang:en -is:retweet`);
-        url.searchParams.set('max_results', '10');
-        url.searchParams.set('tweet.fields', 'public_metrics,entities');
-        const res = await fetch(url.toString(), {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: AbortSignal.timeout(5000),
-        });
-        if (!res.ok) return [];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const data = await res.json() as any;
-        return (data?.data ?? []) as Array<{ text: string; public_metrics?: { like_count?: number; retweet_count?: number } }>;
-      }),
-    );
-
-    const topics: TrendingTopic[] = [];
-    const seen = new Set<string>();
-    for (const r of results) {
-      if (r.status !== 'fulfilled') continue;
-      for (const tweet of r.value) {
-        const text = tweet.text?.replace(/https?:\/\/\S+/g, '').replace(/@\S+/g, '').trim();
-        if (!text || text.length < 10) continue;
-        const name = text.slice(0, 80);
-        const key = name.toLowerCase().slice(0, 30);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const likes = tweet.public_metrics?.like_count ?? 0;
-        const retweets = tweet.public_metrics?.retweet_count ?? 0;
-        topics.push({ name, traffic: likes + retweets * 3 });
-      }
-    }
-    console.log(`[Instagram] Twitter supplement: ${topics.length} trending topics`);
-    return topics.slice(0, 8);
-  } catch {
-    return [];
-  }
-}
-
-// ─── Real-time fallback: Google Trends IN → Instagram moments ─────────────────
-// Called when Apify fails or has no credits. Fetches live trending topics
-// from Google India (updates every hour) and enriches with Instagram post counts.
-
-async function fetchViaGoogleTrendsFallback(): Promise<Moment[]> {
-  console.log('[Instagram] Using Google Trends India real-time fallback...');
-
-  const topics = await fetchGoogleTrendsIndia();
-
-  if (topics.length === 0) {
-    console.warn('[Instagram] Google Trends also empty — returning 0 moments');
-    return [];
-  }
-
-  // Also pull in Twitter trending topics as additional Instagram moment sources
-  const twitterTopics = await fetchTwitterTrendingTopics();
-  const allTopics = [...topics, ...twitterTopics].slice(0, 20);
-
-  // Concurrently check Instagram post counts for all topics (best effort, 4s timeout each)
-  const enriched = await Promise.allSettled(
-    allTopics.slice(0, 18).map(async topic => {
-      const igCount = await getInstagramHashtagCount(topic.name.replace(/\s+/g, ''));
-      return { ...topic, igCount };
-    }),
-  );
-
-  const moments: Moment[] = [];
-
-  for (const result of enriched) {
-    if (result.status !== 'fulfilled') continue;
-    const { name, traffic, relatedNews, igCount } = result.value;
-
-    // Score: Google traffic volume is the primary signal
+  for (let i = 0; i < topics.length; i++) {
+    const { name, traffic, relatedNews } = topics[i];
     let score = 68;
-    if (traffic) {
-      score = Math.min(96, 62 + Math.floor(Math.log10(traffic + 1) * 8));
-    }
-    // Secondary boost: Instagram confirms high post volume on this topic
-    if (igCount && igCount > 500_000) score = Math.min(99, score + 6);
-    else if (igCount && igCount > 100_000) score = Math.min(99, score + 3);
+    if (traffic) score = Math.min(96, 62 + Math.floor(Math.log10(traffic + 1) * 8));
 
-    const imageUrl = getCategoryFallbackImage('', name + ' ' + (relatedNews?.join(' ') ?? ''));
+    // Use the related news headline as description — actual context, not boilerplate
+    const newsHeadline = relatedNews?.[0] ?? '';
+    const trafficLabel = traffic
+      ? ` • ${traffic >= 1_000_000
+          ? `${(traffic / 1_000_000).toFixed(1)}M`
+          : traffic >= 1000 ? `${Math.round(traffic / 1000)}K` : String(traffic)} searches`
+      : '';
+    const parts: string[] = [];
+    if (newsHeadline) parts.push(newsHeadline.slice(0, 120));
+    if (!newsHeadline) parts.push(`Trending in India${trafficLabel}`);
+    else if (trafficLabel) parts.push(trafficLabel.replace(' • ', ''));
 
-    // Build rich description with real data
-    const parts: string[] = ['Trending in India right now'];
-    if (traffic) {
-      const trafficLabel = traffic >= 1_000_000
-        ? `${(traffic / 1_000_000).toFixed(1)}M`
-        : traffic >= 1000
-        ? `${Math.round(traffic / 1000)}K`
-        : traffic.toString();
-      parts.push(`${trafficLabel}+ searches today`);
-    }
-    if (igCount && igCount > 0) {
-      const igLabel = igCount >= 1_000_000
-        ? `${(igCount / 1_000_000).toFixed(1)}M`
-        : igCount >= 1000
-        ? `${Math.round(igCount / 1000)}K`
-        : igCount.toString();
-      parts.push(`${igLabel}+ Instagram posts`);
-    }
-    if (relatedNews?.[0]) parts.push(relatedNews[0].slice(0, 80));
-
-    const moment = classifyTrend({
+    const m = classifyTrend({
       name: name.slice(0, 100),
       description: parts.join(' • '),
-      imageUrl,
+      imageUrl: imageUrls[i],
       trendingScore: score,
       platform: 'Instagram',
     });
-    if (moment) moments.push(moment);
+    if (m) moments.push(m);
   }
 
-  console.log(`[Instagram] Real-time fallback: ${moments.length} moments from live Google Trends data`);
+  console.log(`[Instagram] Google Trends fallback → ${moments.length} moments`);
   return moments;
 }
 
 // ─── Main export ──────────────────────────────────────────────────────────────
+
 export async function fetchInstagramTrends(): Promise<Moment[]> {
   const token = process.env.APIFY_TOKEN;
 
-  if (!token) {
-    console.warn('[Instagram] APIFY_TOKEN not set — using Google Trends real-time fallback');
-    return fetchViaGoogleTrendsFallback();
+  // Always fetch Google Trends first — it's free and seeds hashtags + fallback
+  const topics = await fetchGoogleTrendsIndia();
+
+  // Build final hashtag list: Google Trends topics + always-on seeds, deduped
+  const gtHashtags = topics
+    .map(t => toHashtag(t.name))
+    .filter(h => h.length >= 2);
+  const allHashtags = [...new Set([...gtHashtags, ...SEED_HASHTAGS])];
+  console.log(`[Instagram] ${allHashtags.length} hashtags ready (${gtHashtags.length} from trends + ${SEED_HASHTAGS.length} seeds)`);
+
+  if (token) {
+    // ── Path 1: Hashtag search ──────────────────────────────────────────────
+    // Use top 20 hashtags, 10 posts each → up to 200 posts
+    // Cost: 200 × $0.0023 = $0.46 per run
+    const top20 = allHashtags.slice(0, 20);
+    const hashtagPosts = await runInstagramScraper(
+      token,
+      {
+        searchHashtags: top20,
+        resultsType: 'posts',
+        resultsLimit: 10,        // 10 posts per hashtag
+      },
+      'hashtag-search',
+      top20.length * 10,         // reserve for up to 200 posts
+      5,                         // min viable = 5 posts
+    );
+
+    if (hashtagPosts.length > 0) {
+      const moments = await postsToMoments(hashtagPosts);
+      if (moments.length > 0) {
+        console.log(`[Instagram] ✓ ${moments.length} moments via hashtag search`);
+        return moments;
+      }
+      console.warn('[Instagram] Hashtag posts found but all filtered out — trying profiles');
+    } else {
+      console.warn('[Instagram] Hashtag search returned 0 — trying profiles');
+    }
+
+    // ── Path 2: Profile scraping ────────────────────────────────────────────
+    // 20 profiles × 5 posts each → up to 100 posts
+    // Cost: 100 × $0.0023 = $0.23 per run
+    const profilePosts = await runInstagramScraper(
+      token,
+      {
+        directUrls: PROFILE_URLS,
+        resultsType: 'posts',
+        resultsLimit: 5,         // 5 posts per profile
+      },
+      'profile-scrape',
+      PROFILE_URLS.length * 5,  // reserve for up to 100 posts
+      5,                         // min viable = 5 posts
+    );
+
+    if (profilePosts.length > 0) {
+      const moments = await postsToMoments(profilePosts);
+      if (moments.length > 0) {
+        console.log(`[Instagram] ✓ ${moments.length} moments via profile scraping`);
+        return moments;
+      }
+      console.warn('[Instagram] Profile posts found but all filtered — using Google Trends fallback');
+    } else {
+      console.warn('[Instagram] Profile scraping returned 0 — using Google Trends fallback');
+    }
+  } else {
+    console.warn('[Instagram] APIFY_TOKEN not set — using Google Trends fallback');
   }
 
-  try {
-    const apifyResults = await fetchViaApify(token);
-    if (apifyResults.length > 0) {
-      console.log(`[Instagram] ✓ ${apifyResults.length} live moments from Apify Instagram scraper`);
-      return apifyResults;
-    }
-    console.warn('[Instagram] Apify empty — switching to Google Trends real-time fallback');
-    return fetchViaGoogleTrendsFallback();
-  } catch (e) {
-    console.error('[Instagram] Apify error:', e);
-    return fetchViaGoogleTrendsFallback();
+  // ── Path 3: Google Trends fallback ─────────────────────────────────────────
+  // Free, always available, guaranteed results when Google Trends is up.
+  const moments = await googleTrendsToMoments(topics);
+  if (moments.length > 0) {
+    console.log(`[Instagram] ✓ ${moments.length} moments via Google Trends fallback`);
+    return moments;
   }
+
+  // ── Path 4: Emergency seed fallback ─────────────────────────────────────────
+  // If everything else failed (budget gone + Google Trends down), produce moments
+  // from the hardcoded seed hashtags so the Instagram section is never empty.
+  console.warn('[Instagram] All paths returned 0 — using emergency seed fallback');
+  const now = new Date().toISOString();
+  const seedMoments: Moment[] = [];
+  const seedBatch = SEED_HASHTAGS.slice(0, 10);
+  const seedImages = await Promise.all(seedBatch.map(h => fetchTopicImage(h)));
+  for (let i = 0; i < seedBatch.length; i++) {
+    const hashtag = seedBatch[i];
+    const m = classifyTrend({
+      name: `#${hashtag}`,
+      description: `Trending hashtag on Instagram India`,
+      imageUrl: seedImages[i],
+      trendingScore: 65,
+      platform: 'Instagram',
+      originDate: now,
+    });
+    if (m) seedMoments.push(m);
+  }
+  console.log(`[Instagram] ✓ ${seedMoments.length} moments via seed fallback`);
+  return seedMoments;
 }

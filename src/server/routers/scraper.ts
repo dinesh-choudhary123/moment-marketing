@@ -60,7 +60,7 @@ export const scraperRouter = router({
       if (!canScrape()) {
         return { success: false, message: 'Scraper cooled down (6h) — try again later', added: 0, total: momentsStore.size };
       }
-      const moments = await fetchRedditTrends(input.sort);
+      const moments = await fetchRedditTrends();
       const added = replacePlatformMoments('Reddit', moments);
       return {
         success: true,

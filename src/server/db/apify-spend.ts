@@ -14,15 +14,25 @@ export const DAILY_CAP_USD = 2.0;
 
 // Published Apify per-result pricing (pay-per-event actors).
 export const COST_PER_ITEM: Record<ApifyActor, number> = {
-  'apify/instagram-scraper': 0.0023, //  $2.30 / 1K items
-  'apify/facebook-posts-scraper': 0.0050, // $5.00 / 1K items
-  'apidojo/tweet-scraper': 0.0004, //  $0.40 / 1K tweets (apidojo free/cheap tier)
+  'apify/instagram-scraper':          0.0023, // $2.30 / 1K items  (legacy)
+  'apify/facebook-posts-scraper':     0.0050, // $5.00 / 1K items  (legacy)
+  'apidojo/tweet-scraper':            0.0004, // $0.40 / 1K tweets (legacy)
+  'quacker/twitter-scraper':          0.0010, // $1.00 / 1K tweets
+  'apify/instagram-hashtag-scraper':  0.0040, // $4.00 / 1K posts
+  'apify/facebook-pages-scraper':     0.0050, // $5.00 / 1K posts
+  'emastra/google-trends-scraper':    0.0020, // $2.00 / 1K items
+  'apify/youtube-scraper':            0.0030, // $3.00 / 1K items
 };
 
 export type ApifyActor =
-  | 'apify/instagram-scraper'
-  | 'apify/facebook-posts-scraper'
-  | 'apidojo/tweet-scraper';
+  | 'apify/instagram-scraper'          // legacy
+  | 'apify/facebook-posts-scraper'     // legacy
+  | 'apidojo/tweet-scraper'            // legacy
+  | 'quacker/twitter-scraper'          // Twitter trending topics
+  | 'apify/instagram-hashtag-scraper'  // Instagram hashtag posts
+  | 'apify/facebook-pages-scraper'     // Facebook page posts
+  | 'emastra/google-trends-scraper'    // Google Trends realtime
+  | 'apify/youtube-scraper';           // YouTube quota fallback
 
 interface Ledger {
   date: string; // YYYY-MM-DD (UTC)

@@ -1,268 +1,107 @@
 import type { Moment } from '@/types';
 import { classifyTrend } from './classifier';
+import { fetchTopicImage } from './image-utils';
 
-export type RedditSortOption = 'hot' | 'top' | 'new' | 'relevance';
+// ─── Reddit r/all/hot — single lightweight call, no auth needed ───────────────
+// Returns the 25 hottest posts across all of Reddit right now.
+// Image: data.thumbnail (if not a sentinel) → data.preview.images[0].source.url → fetchTopicImage
 
-const HEADERS = { 'User-Agent': 'MomentMarketing/1.0 (by /u/momentmarketing)' };
+const HEADERS = { 'User-Agent': 'MomentMarketing/2.0 (by /u/momentmarketing)' };
 
-// Surface posts with ≥1k upvotes — captures normal trending content, not just mega-viral
-const VIRAL_UPVOTE_THRESHOLD = 1_000;
-// Only keep posts created within the last 48 hours
-const FRESHNESS_WINDOW_MS = 48 * 60 * 60 * 1000;
-function isFresh(unixSec: number | undefined): boolean {
-  if (!unixSec) return false;
-  return Date.now() - unixSec * 1000 <= FRESHNESS_WINDOW_MS;
-}
+// Reddit sentinels that are not real thumbnail URLs
+const THUMBNAIL_SENTINELS = new Set(['self', 'default', 'nsfw', 'image', 'spoiler', '']);
 
-// Subreddits to scrape for viral global + India-centric content
-const TRENDING_SUBREDDITS = [
-  'all',
-  'popular',
-  'india',
-  'IndiaSpeaks',
-  'BollywoodNews',
-  'bollywood',
-  'Cricket',
-  'ipl',
-  'memes',
-  'dankmemes',
-  'funny',
-  'worldnews',
-  'news',
-  'technology',
-  'sports',
-  'entertainment',
-  'movies',
-  'music',
-  'gaming',
-  'videos',
-  'pics',
-  'interestingasfuck',
-  'nextfuckinglevel',
-  'Damnthatsinteresting',
-  'todayilearned',
-];
-
-// Search queries for live events
-const SEARCH_QUERIES = [
-  'trending India',
-  'IPL 2026',
-  'Bollywood',
-  'viral',
-  'breaking news India',
-  'viral video',
-];
-
-// ─── Image extraction ────────────────────────────────────────
-
-interface RedditPostData {
+interface RedditPost {
   title?: string;
-  selftext?: string;
+  selftext?: string;   // post body — available for text posts
   subreddit?: string;
   ups?: number;
   score?: number;
-  upvote_ratio?: number;
   num_comments?: number;
-  url?: string;
-  url_overridden_by_dest?: string;
   thumbnail?: string;
-  post_hint?: string;
-  is_video?: boolean;
-  is_gallery?: boolean;
-  is_self?: boolean;
-  domain?: string;
-  permalink?: string;
-  created_utc?: number;
   preview?: {
     images?: Array<{
-      source?: { url?: string; width?: number; height?: number };
-      resolutions?: Array<{ url?: string; width?: number; height?: number }>;
+      source?: { url?: string };
     }>;
   };
-  media_metadata?: Record<string, {
-    status?: string;
-    e?: string;
-    s?: { u?: string; x?: number; y?: number };
-    p?: Array<{ u?: string; x?: number; y?: number }>;
-  }>;
-  secure_media?: {
-    reddit_video?: { fallback_url?: string };
-  };
+  created_utc?: number;
+  url?: string;
 }
 
-// Category-based Unsplash fallback images for Reddit posts without accessible images
-const REDDIT_FALLBACK_IMAGES: Record<string, string> = {
-  sports: 'https://images.unsplash.com/photo-1540747913346-19212a4b423f?w=800&auto=format&fit=crop',
-  cricket: 'https://images.unsplash.com/photo-1531415074968-036ba1b575da?w=800&auto=format&fit=crop',
-  meme: 'https://images.unsplash.com/photo-1516251193007-45ef944ab0c6?w=800&auto=format&fit=crop',
-  funny: 'https://images.unsplash.com/photo-1516251193007-45ef944ab0c6?w=800&auto=format&fit=crop',
-  news: 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=800&auto=format&fit=crop',
-  tech: 'https://images.unsplash.com/photo-1519389950473-47ba0277781c?w=800&auto=format&fit=crop',
-  gaming: 'https://images.unsplash.com/photo-1552820728-8b83bb6b773f?w=800&auto=format&fit=crop',
-  india: 'https://images.unsplash.com/photo-1524492412937-b28074a5d7da?w=800&auto=format&fit=crop',
-  bollywood: 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=800&auto=format&fit=crop',
-  food: 'https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=800&auto=format&fit=crop',
-  default: 'https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=800&auto=format&fit=crop',
-};
-
-function getRedditFallbackImage(title: string, subreddit: string): string {
-  const text = (title + ' ' + subreddit).toLowerCase();
-  if (/cricket|ipl|sport|football|nba/.test(text)) return REDDIT_FALLBACK_IMAGES.cricket;
-  if (/meme|funny|humor|lol/.test(text)) return REDDIT_FALLBACK_IMAGES.meme;
-  if (/tech|ai|software|hardware/.test(text)) return REDDIT_FALLBACK_IMAGES.tech;
-  if (/gaming|gta|game|esport/.test(text)) return REDDIT_FALLBACK_IMAGES.gaming;
-  if (/india|bollywood/.test(text)) return REDDIT_FALLBACK_IMAGES.india;
-  if (/bollywood|film|movie/.test(text)) return REDDIT_FALLBACK_IMAGES.bollywood;
-  if (/food|recipe|cook/.test(text)) return REDDIT_FALLBACK_IMAGES.food;
-  if (/news|world|politics/.test(text)) return REDDIT_FALLBACK_IMAGES.news;
-  return REDDIT_FALLBACK_IMAGES.default;
+interface RedditListing {
+  data?: { children?: Array<{ data?: RedditPost }> };
 }
 
-function extractImageUrl(d: RedditPostData): string | undefined {
-  // NOTE: preview.redd.it returns 403 when hotlinked — only use i.redd.it
-
-  // 1. Direct i.redd.it image (always public, no hotlink protection)
-  const directUrl = d.url_overridden_by_dest ?? d.url;
-  if (directUrl && (directUrl.startsWith('https://i.redd.it/') || directUrl.startsWith('http://i.redd.it/'))) {
-    return directUrl;
-  }
-
-  // 2. Direct image URL from imgur or other public hosts
-  if (directUrl && /\.(jpg|jpeg|png|gif|webp)(\?|$)/i.test(directUrl)) {
-    if (!directUrl.includes('preview.redd.it') && !directUrl.includes('external-preview.redd.it')) {
-      return directUrl;
-    }
-  }
-
-  // 3. Gallery — first image via i.redd.it (extract the id from media_metadata)
-  if (d.is_gallery && d.media_metadata) {
-    for (const [mediaId, meta] of Object.entries(d.media_metadata)) {
-      if (meta.status === 'valid' && meta.e === 'Image') {
-        // Reconstruct i.redd.it URL from media id
-        return `https://i.redd.it/${mediaId}.jpg`;
-      }
-    }
-  }
-
-  // 4. Thumbnail — only if it's a proper HTTP URL (skip "self", "nsfw", "default" etc.)
-  if (d.thumbnail && d.thumbnail.startsWith('https://') && !d.thumbnail.includes('preview.redd.it')) {
+/** Extract a real image URL from a Reddit post — no fetchTopicImage fallback here. */
+function extractDirectImage(d: RedditPost): string | undefined {
+  // 1. thumbnail — valid https URL that isn't a Reddit sentinel
+  if (
+    d.thumbnail &&
+    d.thumbnail.startsWith('https://') &&
+    !THUMBNAIL_SENTINELS.has(d.thumbnail)
+  ) {
     return d.thumbnail;
   }
 
-  // 5. Fall back to category-based Unsplash image
-  return getRedditFallbackImage(d.title ?? '', d.subreddit ?? '');
+  // 2. preview image — HTML-decode &amp; (Reddit escapes & in JSON-inside-HTML contexts)
+  const previewUrl = d.preview?.images?.[0]?.source?.url;
+  if (previewUrl) return previewUrl.replace(/&amp;/g, '&');
+
+  return undefined;
 }
 
-function cleanUrl(url: string): string {
-  return url.replace(/&amp;/g, '&');
-}
-
-// ─── Fetching ────────────────────────────────────────────────
-
-interface RedditListing {
-  data?: {
-    children?: Array<{ data?: RedditPostData }>;
-  };
-}
-
-async function fetchSubreddit(
-  subreddit: string,
-  sort: RedditSortOption,
-  limit = 50,
-  timeRange = 'day',
-): Promise<RedditPostData[]> {
-  const timeParam = sort === 'top' ? `&t=${timeRange}` : '';
-  const url = `https://www.reddit.com/r/${subreddit}/${sort}.json?limit=${limit}&raw_json=1${timeParam}`;
-
+export async function fetchRedditTrends(): Promise<Moment[]> {
   try {
-    const res = await fetch(url, { headers: HEADERS });
-    if (!res.ok) return [];
-    const data = (await res.json()) as RedditListing;
-    return (data.data?.children ?? []).map(c => c.data!).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
+    const res = await fetch('https://www.reddit.com/r/all/hot.json?limit=25', {
+      headers: HEADERS,
+      signal: AbortSignal.timeout(15_000),
+    });
 
-async function searchReddit(query: string, sort: RedditSortOption, limit = 15): Promise<RedditPostData[]> {
-  const timeParam = sort === 'top' ? '&t=day' : '';
-  const url = `https://www.reddit.com/search.json?q=${encodeURIComponent(query)}&sort=${sort}&limit=${limit}&raw_json=1${timeParam}`;
+    if (!res.ok) {
+      console.warn(`[Reddit] r/all/hot returned ${res.status}`);
+      return [];
+    }
 
-  try {
-    const res = await fetch(url, { headers: HEADERS });
-    if (!res.ok) return [];
-    const data = (await res.json()) as RedditListing;
-    return (data.data?.children ?? []).map(c => c.data!).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
+    const data = await res.json() as RedditListing;
+    const posts = (data.data?.children ?? [])
+      .map(c => c.data!)
+      .filter((d): d is RedditPost => !!d && !!d.title);
 
-// ─── Main export ─────────────────────────────────────────────
+    console.log(`[Reddit] r/all/hot → ${posts.length} posts`);
 
-// Batch helper to avoid Reddit rate limits (~60 req/min)
-async function runBatched<T>(
-  tasks: Array<() => Promise<T>>,
-  batchSize = 8,
-  delayMs = 300,
-): Promise<T[]> {
-  const out: T[] = [];
-  for (let i = 0; i < tasks.length; i += batchSize) {
-    const chunk = tasks.slice(i, i + batchSize);
-    const res = await Promise.allSettled(chunk.map(t => t()));
-    for (const r of res) if (r.status === 'fulfilled') out.push(r.value);
-    if (i + batchSize < tasks.length) await new Promise(r => setTimeout(r, delayMs));
-  }
-  return out;
-}
+    // Resolve images in parallel: direct post image or fetchTopicImage fallback
+    const imageUrls = await Promise.all(
+      posts.map(d => {
+        const direct = extractDirectImage(d);
+        return direct ? Promise.resolve(direct) : fetchTopicImage(d.title ?? 'reddit trending');
+      }),
+    );
 
-export async function fetchRedditTrends(sort: RedditSortOption = 'top'): Promise<Moment[]> {
-  try {
-    // Build tasks — fetch top-of-day and top-of-week from each subreddit + searches
-    const tasks: Array<() => Promise<RedditPostData[]>> = [
-      ...TRENDING_SUBREDDITS.map(sub => () => fetchSubreddit(sub, 'top', 50, 'day')),
-      ...TRENDING_SUBREDDITS.map(sub => () => fetchSubreddit(sub, 'top', 25, 'week')),
-      ...SEARCH_QUERIES.map(q => () => searchReddit(q, sort, 25)),
-    ];
-
-    const batched = await runBatched(tasks, 8, 400);
-    const allPosts: RedditPostData[] = batched.flat();
-
-    // Dedupe, filter by viral threshold, sort by score
-    const seen = new Set<string>();
-    const viralPosts = allPosts
-      .filter(d => {
-        if (!d.title) return false;
-        if (!isFresh(d.created_utc)) return false;
-        const ups = d.ups ?? d.score ?? 0;
-        // Only keep actually viral posts
-        if (ups < VIRAL_UPVOTE_THRESHOLD) return false;
-        const key = d.title.toLowerCase().trim();
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      })
-      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-
-    console.log(`[Reddit] Found ${viralPosts.length} viral posts (≥${VIRAL_UPVOTE_THRESHOLD.toLocaleString()} upvotes) out of ${allPosts.length} scraped`);
-
-    return viralPosts.slice(0, 80).map(d => {
+    const moments: Moment[] = [];
+    for (let i = 0; i < posts.length; i++) {
+      const d = posts[i];
       const ups = d.ups ?? d.score ?? 0;
       const comments = d.num_comments ?? 0;
-      // Score scales with log of upvotes; 10k=83, 50k=91, 100k=95, 200k=99
-      const score = Math.min(100, 50 + Math.floor(Math.log10(ups) * 10));
+      const score = Math.min(100, 50 + Math.floor(Math.log10(Math.max(ups + 1, 1)) * 10));
 
-      const imageUrl = extractImageUrl(d);
+      // Use the post body as description when available — much more informative than upvote counts
+      const body = (d.selftext ?? '').replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+      const description = body.length > 20
+        ? `${body.slice(0, 120)}${body.length > 120 ? '…' : ''}`
+        : `r/${d.subreddit ?? 'all'} • ${ups.toLocaleString()} upvotes • ${comments.toLocaleString()} comments`;
 
-      return classifyTrend({
+      const moment = classifyTrend({
         name: (d.title ?? '').slice(0, 100),
-        description: `r/${d.subreddit ?? 'reddit'} • ${ups.toLocaleString()} upvotes • ${comments.toLocaleString()} comments`,
-        imageUrl,
+        description,
+        imageUrl: imageUrls[i],
         trendingScore: score,
         platform: 'Reddit',
         originDate: d.created_utc ? new Date(d.created_utc * 1000).toISOString() : undefined,
       });
-    }).filter((m): m is NonNullable<typeof m> => m !== null);
+      if (moment) moments.push(moment);
+    }
+
+    return moments;
   } catch (e) {
     console.error('[Reddit] Scraper failed:', e);
     return [];

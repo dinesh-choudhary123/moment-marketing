@@ -307,6 +307,36 @@ function pickImage(name: string, arr: string[]): string {
   return arr[Math.abs(hash) % arr.length];
 }
 
+// Bounded FIFO of recently-emitted image URLs. When a hash collision yields
+// an already-used URL, we re-pick with a salted name to nudge to a new index.
+const RECENT_IMAGES_LIMIT = 200;
+const recentImageUrls: string[] = [];
+const recentImageSet = new Set<string>();
+
+function rememberImage(url: string): void {
+  if (recentImageSet.has(url)) return;
+  recentImageUrls.push(url);
+  recentImageSet.add(url);
+  if (recentImageUrls.length > RECENT_IMAGES_LIMIT) {
+    const evicted = recentImageUrls.shift();
+    if (evicted) recentImageSet.delete(evicted);
+  }
+}
+
+function dedupeFallbackImage(name: string, category: MomentCategory, initialUrl: string): string {
+  if (!recentImageSet.has(initialUrl)) return initialUrl;
+  // Try salted picks from the category pool first
+  const pool = CATEGORY_FALLBACK_IMAGES[category];
+  if (pool && pool.length > 1) {
+    for (let i = 1; i <= 3; i++) {
+      const candidate = pickImage(`${name}_dup${i}`, pool);
+      if (!recentImageSet.has(candidate)) return candidate;
+    }
+  }
+  // Absolute last resort: salt the name to get a different index in the pool
+  return pickImage(`${name}_salt`, CATEGORY_FALLBACK_IMAGES[category]);
+}
+
 // Pick a keyword-specific Unsplash image — topic-matched for maximum visual relevance
 function getSmartFallbackImage(name: string, description: string, category: MomentCategory): string {
   const text = (name + ' ' + description).toLowerCase();
@@ -320,9 +350,21 @@ function getSmartFallbackImage(name: string, description: string, category: Mome
     'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=800&auto=format&fit=crop',
     'https://images.unsplash.com/photo-1553778263-73a83bab9b0c?w=800&auto=format&fit=crop',
   ]);
-  if (/tennis|wimbledon/.test(text)) return 'https://images.unsplash.com/photo-1595435934249-5df7ed86e1c0?w=800&auto=format&fit=crop';
-  if (/f1|formula|motorsport/.test(text)) return 'https://images.unsplash.com/photo-1541447271487-09612b3f49f7?w=800&auto=format&fit=crop';
-  if (/basketball|nba/.test(text)) return 'https://images.unsplash.com/photo-1546519638405-a9f1e1b1c198?w=800&auto=format&fit=crop';
+  if (/tennis|wimbledon/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1595435934249-5df7ed86e1c0?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1554068865-24cecd4e34b8?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1622279457486-62dcc4a431d6?w=800&auto=format&fit=crop',
+  ]);
+  if (/f1|formula|motorsport/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1541447271487-09612b3f49f7?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1504707748692-419802cf939d?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1568772585407-9361f9bf3a87?w=800&auto=format&fit=crop',
+  ]);
+  if (/basketball|nba/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1546519638405-a9f1e1b1c198?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1518614368389-9d6cf3a82e6e?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1519861531473-9200262188bf?w=800&auto=format&fit=crop',
+  ]);
   // Bollywood / cinema
   if (/bollywood|hindi film|movie|trailer|release|cinema/.test(text)) return pickImage(name, [
     'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=800&auto=format&fit=crop',
@@ -330,27 +372,92 @@ function getSmartFallbackImage(name: string, description: string, category: Mome
     'https://images.unsplash.com/photo-1478720568477-152d9b164e26?w=800&auto=format&fit=crop',
   ]);
   // Festivals
-  if (/holi/.test(text)) return 'https://images.unsplash.com/photo-1530103862676-de8c9debad1d?w=800&auto=format&fit=crop';
-  if (/diwali/.test(text)) return 'https://images.unsplash.com/photo-1605810230434-7631ac76ec81?w=800&auto=format&fit=crop';
-  if (/eid/.test(text)) return 'https://images.unsplash.com/photo-1565620731358-e8c038abc8d1?w=800&auto=format&fit=crop';
-  if (/christmas/.test(text)) return 'https://images.unsplash.com/photo-1512389142860-9c449e58a543?w=800&auto=format&fit=crop';
-  if (/new year/.test(text)) return 'https://images.unsplash.com/photo-1467810563316-b5476525c0f9?w=800&auto=format&fit=crop';
-  if (/navratri|garba|dandiya/.test(text)) return 'https://images.unsplash.com/photo-1600093463592-8e36ae95ef56?w=800&auto=format&fit=crop';
-  if (/raksha|rakhi/.test(text)) return 'https://images.unsplash.com/photo-1612178537253-bccd437b730e?w=800&auto=format&fit=crop';
-  if (/independence day|republic day/.test(text)) return 'https://images.unsplash.com/photo-1529107386315-e1a2ed48a620?w=800&auto=format&fit=crop';
-  if (/women.*day|mother.*day|father.*day/.test(text)) return 'https://images.unsplash.com/photo-1607748851687-ba9a10438621?w=800&auto=format&fit=crop';
+  if (/holi/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1530103862676-de8c9debad1d?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1615473967657-9dc21f971b88?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1583149577040-5c08ec90e22a?w=800&auto=format&fit=crop',
+  ]);
+  if (/diwali/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1605810230434-7631ac76ec81?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1604423043492-41d57f60317e?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1574265933814-91cdc0e1cf8a?w=800&auto=format&fit=crop',
+  ]);
+  if (/eid/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1565620731358-e8c038abc8d1?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1542816417-0983c9c9ad53?w=800&auto=format&fit=crop',
+  ]);
+  if (/christmas/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1512389142860-9c449e58a543?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1543589077-47d81606c1bf?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1482517967863-00e15c9b44be?w=800&auto=format&fit=crop',
+  ]);
+  if (/new year/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1467810563316-b5476525c0f9?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1546271876-af6caec5fae4?w=800&auto=format&fit=crop',
+  ]);
+  if (/navratri|garba|dandiya/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1600093463592-8e36ae95ef56?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1601121141461-9d6647bca1ed?w=800&auto=format&fit=crop',
+  ]);
+  if (/raksha|rakhi/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1612178537253-bccd437b730e?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1597149959183-31db82185b4e?w=800&auto=format&fit=crop',
+  ]);
+  if (/independence day|republic day/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1529107386315-e1a2ed48a620?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1532375810709-75b1da00537c?w=800&auto=format&fit=crop',
+  ]);
+  if (/women.*day|mother.*day|father.*day/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1607748851687-ba9a10438621?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1518156677180-95a2893f3e9f?w=800&auto=format&fit=crop',
+  ]);
   // Tech
-  if (/iphone|apple/.test(text)) return 'https://images.unsplash.com/photo-1510557880182-3d4d3cba35a5?w=800&auto=format&fit=crop';
-  if (/samsung|android/.test(text)) return 'https://images.unsplash.com/photo-1605236453806-6ff36851218e?w=800&auto=format&fit=crop';
-  if (/ai|artificial intelligence|chatgpt|openai/.test(text)) return 'https://images.unsplash.com/photo-1677442135703-1787eea5ce01?w=800&auto=format&fit=crop';
-  if (/startup|funding/.test(text)) return 'https://images.unsplash.com/photo-1552664730-d307ca884978?w=800&auto=format&fit=crop';
+  if (/iphone|apple/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1510557880182-3d4d3cba35a5?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1592750475338-74b7b21085ab?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1556656793-08538906a9f8?w=800&auto=format&fit=crop',
+  ]);
+  if (/samsung|android/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1605236453806-6ff36851218e?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1610945265064-0e34e5519bbf?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1567581935884-3349723552ca?w=800&auto=format&fit=crop',
+  ]);
+  if (/ai|artificial intelligence|chatgpt|openai/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1677442135703-1787eea5ce01?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1655720828018-edd2daec9349?w=800&auto=format&fit=crop',
+  ]);
+  if (/startup|funding/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1552664730-d307ca884978?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1542744173-8e7e53415bb0?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1556761175-5973dc0f32e7?w=800&auto=format&fit=crop',
+  ]);
   // Finance
-  if (/budget|tax|income/.test(text)) return 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=800&auto=format&fit=crop';
-  if (/stock|sensex|nifty|market|ipo/.test(text)) return 'https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&auto=format&fit=crop';
-  if (/crypto|bitcoin/.test(text)) return 'https://images.unsplash.com/photo-1518546305927-5a555bb7020d?w=800&auto=format&fit=crop';
+  if (/budget|tax|income/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1554224154-26032ffc0d07?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1450101499163-c8848c66ca85?w=800&auto=format&fit=crop',
+  ]);
+  if (/stock|sensex|nifty|market|ipo/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1535320903710-d993d3d77d29?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1590283603385-17ffb3a7f29f?w=800&auto=format&fit=crop',
+  ]);
+  if (/crypto|bitcoin/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1518546305927-5a555bb7020d?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1621761191319-c6fb62004040?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1640340434855-6084b1f4901c?w=800&auto=format&fit=crop',
+  ]);
   // Music
-  if (/grammy|oscar|award/.test(text)) return 'https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?w=800&auto=format&fit=crop';
-  if (/concert|tour|live music/.test(text)) return 'https://images.unsplash.com/photo-1470229722913-7c0e2dbbafd3?w=800&auto=format&fit=crop';
+  if (/grammy|oscar|award/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1571867424488-4565932edb41?w=800&auto=format&fit=crop',
+  ]);
+  if (/concert|tour|live music/.test(text)) return pickImage(name, [
+    'https://images.unsplash.com/photo-1470229722913-7c0e2dbbafd3?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1501386761578-eac5c94b800a?w=800&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1429962714451-bb934ecdc4ec?w=800&auto=format&fit=crop',
+  ]);
   // Gaming
   if (/bgmi|pubg|gaming|esport/.test(text)) return pickImage(name, CATEGORY_FALLBACK_IMAGES.Gaming);
   // Fashion / brands
@@ -360,7 +467,7 @@ function getSmartFallbackImage(name: string, description: string, category: Mome
   if (/health|fitness|gym|yoga/.test(text)) return pickImage(name, CATEGORY_FALLBACK_IMAGES.Health);
   // Brand campaigns
   if (/campaign|ad |advertis|collab/.test(text)) return pickImage(name, CATEGORY_FALLBACK_IMAGES.Marketing);
-  // Return varied category default (different image per moment name)
+  // Last resort: category pool — curated, always loads, category-relevant.
   return pickImage(name, CATEGORY_FALLBACK_IMAGES[category]);
 }
 
@@ -369,10 +476,9 @@ function getSmartFallbackImage(name: string, description: string, category: Mome
 export function classifyTrend(raw: RawTrend): Moment | null {
   const description = raw.description ?? `Trending on ${raw.platform} with score ${raw.trendingScore}`;
 
-  // Brand safety gate — skip topics that could damage a brand's reputation
-  if (!isBrandSafe(raw.name, description)) {
-    return null; // Caller should filter out nulls
-  }
+  // Note: brand-safety check removed — show ALL real trending topics so users
+  // can make their own judgement. isBrandSafe() is kept for reference only.
+  void isBrandSafe; // prevent unused-variable warning
 
   const category = classifyCategory(raw.name, description);
   const commercialBoost = getCommercialBoost(raw.name, description);
@@ -408,7 +514,12 @@ export function classifyTrend(raw: RawTrend): Moment | null {
   const providedImage = raw.imageUrl && (isLocalOrProxy || !blockedDomains.some(d => raw.imageUrl!.includes(d)))
     ? raw.imageUrl
     : undefined;
-  const imageUrl = providedImage ?? getSmartFallbackImage(raw.name, description, category);
+  let imageUrl = providedImage ?? getSmartFallbackImage(raw.name, description, category);
+  // Only dedupe synthetic fallbacks — real images (cached posts, Wikipedia) are allowed to repeat.
+  if (!providedImage) {
+    imageUrl = dedupeFallbackImage(raw.name, category, imageUrl);
+    rememberImage(imageUrl);
+  }
 
   return {
     id: generateId(),
