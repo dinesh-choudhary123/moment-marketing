@@ -1,36 +1,76 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Moment Marketing
 
-## Getting Started
+This is a [Next.js](https://nextjs.org) application bootstrapped with React 19, Tailwind CSS 4, and tRPC.
 
-First, run the development server:
+## 🚀 Getting Started
+
+### Prerequisites
+- Node.js (v20 or higher recommended)
+- npm, yarn, pnpm, or bun
+
+### Local Development
+
+1. Install the dependencies:
+   ```bash
+   npm install
+   ```
+
+2. Run the development server:
+   ```bash
+   npm run dev
+   ```
+
+3. Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+## 🛠 Tech Stack
+
+- **Framework**: [Next.js 16](https://nextjs.org/) (App Router)
+- **Styling**: [Tailwind CSS 4](https://tailwindcss.com/)
+- **Data Fetching & API**: [tRPC](https://trpc.io/) & [React Query](https://tanstack.com/query/latest)
+- **Utilities**: Lucide React, Zod, clsx, tailwind-merge, date-fns
+
+## 📦 Deployment Guide
+
+This project is configured and optimized for production. It is ready to be deployed on modern cloud platforms, including our primary targets: **Base44** and **Threezinc**.
+
+### Build for Production
+
+Before deploying, ensure you generate an optimized production build:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+This command creates a `.next` folder with all the optimized static and server-rendered assets.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Deploying to Base44
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+To deploy the Moment Marketing app to **Base44**:
 
-## Learn More
+1. Ensure the Base44 CLI or your CI/CD pipeline is configured with the necessary environment variables required for production.
+2. The Base44 platform runs Node.js applications natively. Set the project's start command to:
+   ```bash
+   npm run start
+   ```
+3. Run the standard Base44 deployment sequence (e.g., `base44 deploy`). The platform will securely host the application and map it to the defined production domain.
 
-To learn more about Next.js, take a look at the following resources:
+### Deploying to Threezinc
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+To deploy the application to **Threezinc**:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. Ensure your Threezinc environment is prepared for a Node.js or Docker-based runtime.
+2. If deploying via container orchestration on Threezinc, you can utilize a standard Next.js `Dockerfile`:
+   ```dockerfile
+   FROM node:20-alpine
+   WORKDIR /app
+   COPY package*.json ./
+   RUN npm ci
+   COPY . .
+   RUN npm run build
+   EXPOSE 3000
+   CMD ["npm", "start"]
+   ```
+3. Push your image to the Threezinc container registry.
+4. Execute the Threezinc deployment command to rollout the new release across your clusters.
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+For advanced environment configuration, secrets management, or scaling adjustments, please refer to the senior engineering team's internal documentation for Base44 and Threezinc.
