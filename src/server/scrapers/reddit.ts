@@ -47,6 +47,11 @@ function extractDirectImage(d: RedditPost): string | undefined {
   const previewUrl = d.preview?.images?.[0]?.source?.url;
   if (previewUrl) return previewUrl.replace(/&amp;/g, '&');
 
+  // 3. direct image URL
+  if (d.url && /\.(jpg|jpeg|png|webp|gif)$/i.test(d.url)) {
+    return d.url;
+  }
+
   return undefined;
 }
 
@@ -69,11 +74,14 @@ export async function fetchRedditTrends(): Promise<Moment[]> {
 
     console.log(`[Reddit] r/all/hot → ${posts.length} posts`);
 
-    // Resolve images in parallel: direct post image or fetchTopicImage fallback
+    // Resolve images in parallel: proxy the direct post image or use fetchTopicImage fallback
     const imageUrls = await Promise.all(
       posts.map(d => {
         const direct = extractDirectImage(d);
-        return direct ? Promise.resolve(direct) : fetchTopicImage(d.title ?? 'reddit trending');
+        if (direct) {
+          return Promise.resolve(`/api/image-proxy?url=${encodeURIComponent(direct)}`);
+        }
+        return fetchTopicImage(d.title ?? 'reddit trending');
       }),
     );
 

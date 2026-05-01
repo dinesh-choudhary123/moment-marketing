@@ -29,29 +29,9 @@ const SEED_HASHTAGS = [
   'food', 'travel', 'sports', 'technology',
 ];
 
-// 20 high-reach Indian accounts across sports, Bollywood, news, brands
-const PROFILE_URLS = [
-  'https://www.instagram.com/virat.kohli/',
-  'https://www.instagram.com/iplt20/',
-  'https://www.instagram.com/bcci/',
-  'https://www.instagram.com/shahrukhkhan/',
-  'https://www.instagram.com/bollywood/',
-  'https://www.instagram.com/pinkvilla/',
-  'https://www.instagram.com/narendramodi/',
-  'https://www.instagram.com/ndtv/',
-  'https://www.instagram.com/aajtak/',
-  'https://www.instagram.com/zomato/',
-  'https://www.instagram.com/myntra/',
-  'https://www.instagram.com/viralbhayani/',
-  'https://www.instagram.com/natgeo/',
-  'https://www.instagram.com/nasa/',
-  'https://www.instagram.com/bbcnews/',
-  'https://www.instagram.com/cristiano/',
-  'https://www.instagram.com/timesnow/',
-  'https://www.instagram.com/anushkasharma/',
-  'https://www.instagram.com/janhvikapoor/',
-  'https://www.instagram.com/saraalikhan95/',
-];
+// We previously had hardcoded celebrity profiles here, but that skewed trends 
+// entirely based on follower counts rather than real virality. We now rely exclusively 
+// on discovering organic trends via hashtags.
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -139,44 +119,33 @@ function filterPosts(posts: InstagramPost[]): InstagramPost[] {
   });
 }
 
-/** Compute engagement-rate-normalised trending score — removes follower-count bias. */
+/** Compute a "bubble escape" virality score to remove follower-count bias. */
 function computeScore(post: InstagramPost): number {
   const likes = post.likesCount ?? 0;
   const comments = post.commentsCount ?? 0;
   const views = post.videoViewCount ?? 0;
-  const followers = post.ownerFollowersCount ?? 0;
-  const isVideo = views > 0 || post.type === 'Video';
-
-  if (followers >= 1000 && (likes + comments > 0)) {
-    // Engagement rate = (likes + comments×5) / followers
-    // Removes bias: a 5% engagement rate on 10K followers beats 0.1% on 10M followers.
-    // 1% → 60, 5% → 80, 10%+ → 100
-    const engRate = (likes + comments * 5) / followers;
-    return Math.min(100, 55 + Math.floor(engRate * 500));
+  
+  // Virality metric: How many views & comments per like? 
+  // High views/comments relative to likes means it's escaping the creator's follower bubble
+  // and hitting the broader algorithm feed.
+  const viralityRatio = ((comments * 20) + views) / (likes + 1);
+  
+  if (views > 0 || post.type === 'Video') {
+    // If it's a Reel/Video, use the virality ratio
+    return Math.min(100, 50 + Math.floor(viralityRatio * 2));
   }
 
-  if (isVideo && views > 0) {
-    // No follower data but has views — use view velocity proxy
-    return Math.min(100, 50 + Math.floor(Math.log10(views + 1) * 7));
-  }
-
-  // Fallback: raw engagement as weak signal
-  const rawEng = likes + comments * 5;
-  return Math.min(100, 50 + Math.floor(Math.log10(rawEng + 1) * 6));
+  // If no views (image post), rely on comments vs likes
+  const commentRatio = comments / (likes + 1);
+  return Math.min(100, 50 + Math.floor(commentRatio * 1000));
 }
 
-/** Sort posts by engagement rate so high-rate smaller creators surface above celebrities. */
+/** Sort posts by virality ratio so viral small-creator reels surface above celebrity posts. */
 function sortByEngagementRate(posts: InstagramPost[]): InstagramPost[] {
   return posts.slice().sort((a, b) => {
-    const followersA = a.ownerFollowersCount ?? 0;
-    const followersB = b.ownerFollowersCount ?? 0;
-    const rateA = followersA > 500
-      ? ((a.likesCount ?? 0) + (a.commentsCount ?? 0) * 5) / followersA
-      : 0;
-    const rateB = followersB > 500
-      ? ((b.likesCount ?? 0) + (b.commentsCount ?? 0) * 5) / followersB
-      : 0;
-    return rateB - rateA;
+    const ratioA = (((a.commentsCount ?? 0) * 20) + (a.videoViewCount ?? 0)) / ((a.likesCount ?? 0) + 1);
+    const ratioB = (((b.commentsCount ?? 0) * 20) + (b.videoViewCount ?? 0)) / ((b.likesCount ?? 0) + 1);
+    return ratioB - ratioA;
   });
 }
 
@@ -186,11 +155,16 @@ function postToMoment(post: InstagramPost, imageUrl: string | undefined): Moment
   const hashtagsText = (post.hashtags ?? []).slice(0, 3).map(h => `#${h}`).join(' ');
   const owner = post.ownerUsername ?? post.ownerFullName ?? 'instagram';
 
-  // Description: actual caption text (stripped of hashtags for readability)
+  // Minimal, useful context: first full sentence of caption or short snippet
   const captionSnippet = caption.replace(/#\S+/g, '').replace(/\s+/g, ' ').trim();
-  const description = captionSnippet.length > 10
-    ? `${captionSnippet.slice(0, 150)}${captionSnippet.length > 150 ? '…' : ''}`
-    : `@${owner}${hashtagsText ? ` • ${hashtagsText}` : ''}`;
+  let description = captionSnippet;
+  if (captionSnippet.length > 120) {
+    const firstSentenceMatch = captionSnippet.match(/^[^.!?]+[.!?]/);
+    description = firstSentenceMatch ? firstSentenceMatch[0] : `${captionSnippet.slice(0, 120)}…`;
+  }
+  if (!description || description.length < 5) {
+    description = `@${owner} shared a trending moment`;
+  }
 
   const ts = getTimestamp(post);
 
@@ -210,20 +184,19 @@ async function postsToMoments(posts: InstagramPost[]): Promise<Moment[]> {
   // Sort by engagement rate first so viral small-creator posts surface above celebrities
   const sorted = sortByEngagementRate(filterPosts(posts));
 
-  // Resolve images in parallel (batch 10) — use caption text as keyword for relevance
-  const imageUrls: Array<string | undefined> = [];
-  for (let i = 0; i < sorted.length; i += 10) {
-    const batch = sorted.slice(i, i + 10);
-    const batchImages = await Promise.all(
-      batch.map(p => {
-        const caption = (p.caption ?? '').replace(/#\S+/g, '').replace(/\n/g, ' ').trim();
-        const hashtags = (p.hashtags ?? []).slice(0, 2).join(' ');
-        const keyword = caption.slice(0, 80) || hashtags || 'instagram trending india';
-        return fetchTopicImage(keyword);
-      }),
-    );
-    imageUrls.push(...batchImages);
-  }
+  // Use actual post images via proxy to avoid CDN blocks, fallback to Unsplash
+  const imageUrls: Array<string | undefined> = await Promise.all(
+    sorted.map(async (p) => {
+      const realUrl = p.displayUrl || p.images?.[0];
+      if (realUrl) {
+        return `/api/image-proxy?url=${encodeURIComponent(realUrl)}`;
+      }
+      const caption = (p.caption ?? '').replace(/#\S+/g, '').replace(/\n/g, ' ').trim();
+      const hashtags = (p.hashtags ?? []).slice(0, 2).join(' ');
+      const keyword = caption.slice(0, 80) || hashtags || 'instagram trending india';
+      return fetchTopicImage(keyword);
+    })
+  );
 
   return sorted
     .map((post, idx) => postToMoment(post, imageUrls[idx]))
@@ -373,21 +346,13 @@ async function googleTrendsToMoments(topics: TrendingTopic[]): Promise<Moment[]>
     let score = 68;
     if (traffic) score = Math.min(96, 62 + Math.floor(Math.log10(traffic + 1) * 8));
 
-    // Use the related news headline as description — actual context, not boilerplate
+    // Use the related news headline as description — actual minimal useful context
     const newsHeadline = relatedNews?.[0] ?? '';
-    const trafficLabel = traffic
-      ? ` • ${traffic >= 1_000_000
-          ? `${(traffic / 1_000_000).toFixed(1)}M`
-          : traffic >= 1000 ? `${Math.round(traffic / 1000)}K` : String(traffic)} searches`
-      : '';
-    const parts: string[] = [];
-    if (newsHeadline) parts.push(newsHeadline.slice(0, 120));
-    if (!newsHeadline) parts.push(`Trending in India${trafficLabel}`);
-    else if (trafficLabel) parts.push(trafficLabel.replace(' • ', ''));
+    let description = newsHeadline ? newsHeadline.slice(0, 150) : `A popular trending topic right now.`;
 
     const m = classifyTrend({
       name: name.slice(0, 100),
-      description: parts.join(' • '),
+      description,
       imageUrl: imageUrls[i],
       trendingScore: score,
       platform: 'Instagram',
@@ -416,18 +381,19 @@ export async function fetchInstagramTrends(): Promise<Moment[]> {
 
   if (token) {
     // ── Path 1: Hashtag search ──────────────────────────────────────────────
-    // Use top 20 hashtags, 10 posts each → up to 200 posts
-    // Cost: 200 × $0.0023 = $0.46 per run
+    // Use top 20 hashtags, 25 posts each → up to 500 posts
+    // This deep pool allows our virality algorithm to sift past the 
+    // celebrity posts and find the true breakout organic trends.
     const top20 = allHashtags.slice(0, 20);
     const hashtagPosts = await runInstagramScraper(
       token,
       {
         searchHashtags: top20,
         resultsType: 'posts',
-        resultsLimit: 10,        // 10 posts per hashtag
+        resultsLimit: 25,        // 25 posts per hashtag
       },
       'hashtag-search',
-      top20.length * 10,         // reserve for up to 200 posts
+      top20.length * 25,         // reserve for up to 500 posts
       5,                         // min viable = 5 posts
     );
 
@@ -437,35 +403,7 @@ export async function fetchInstagramTrends(): Promise<Moment[]> {
         console.log(`[Instagram] ✓ ${moments.length} moments via hashtag search`);
         return moments;
       }
-      console.warn('[Instagram] Hashtag posts found but all filtered out — trying profiles');
-    } else {
-      console.warn('[Instagram] Hashtag search returned 0 — trying profiles');
-    }
-
-    // ── Path 2: Profile scraping ────────────────────────────────────────────
-    // 20 profiles × 5 posts each → up to 100 posts
-    // Cost: 100 × $0.0023 = $0.23 per run
-    const profilePosts = await runInstagramScraper(
-      token,
-      {
-        directUrls: PROFILE_URLS,
-        resultsType: 'posts',
-        resultsLimit: 5,         // 5 posts per profile
-      },
-      'profile-scrape',
-      PROFILE_URLS.length * 5,  // reserve for up to 100 posts
-      5,                         // min viable = 5 posts
-    );
-
-    if (profilePosts.length > 0) {
-      const moments = await postsToMoments(profilePosts);
-      if (moments.length > 0) {
-        console.log(`[Instagram] ✓ ${moments.length} moments via profile scraping`);
-        return moments;
-      }
-      console.warn('[Instagram] Profile posts found but all filtered — using Google Trends fallback');
-    } else {
-      console.warn('[Instagram] Profile scraping returned 0 — using Google Trends fallback');
+      console.warn('[Instagram] Hashtag search returned 0 — using Google Trends fallback');
     }
   } else {
     console.warn('[Instagram] APIFY_TOKEN not set — using Google Trends fallback');
@@ -491,7 +429,7 @@ export async function fetchInstagramTrends(): Promise<Moment[]> {
     const hashtag = seedBatch[i];
     const m = classifyTrend({
       name: `#${hashtag}`,
-      description: `Trending hashtag on Instagram India`,
+      description: `A trending topic right now on Instagram.`,
       imageUrl: seedImages[i],
       trendingScore: 65,
       platform: 'Instagram',

@@ -1,11 +1,11 @@
 // Shared image resolution utility for all trend scrapers.
 //
 // Resolution chain:
-//   1. Wikipedia pageimages API — free, topic-exact when it works
-//   2. Bing News RSS — news article thumbnails, very relevant for trending events
-//   3. Returns undefined — classifyTrend() in classifier.ts then calls
+//   1. YouTube Data API search — most visually relevant, topic-exact thumbnail
+//   2. Wikipedia pageimages API — free, topic-exact when it works
+//   3. Bing News RSS — news article thumbnails, very relevant for trending events
+//   4. Returns undefined — classifyTrend() in classifier.ts then calls
 //      getSmartFallbackImage() which has curated, category-matched Unsplash images.
-//      This is ALWAYS better than a grey SVG with text.
 
 // Per-run dedup set — prevents the same image URL appearing on multiple cards.
 // Cleared via resetImageDedup() at the start of each runAllScrapers() call.
@@ -66,12 +66,61 @@ async function fetchBingNewsImage(keyword: string): Promise<string | undefined> 
 }
 
 /**
+ * Search YouTube for the keyword and return the best video thumbnail.
+ * Uses the YOUTUBE_API_KEY env variable (same one the YouTube scraper uses).
+ * YouTube thumbnails are the most visually relevant source for any trending topic.
+ */
+async function fetchYouTubeThumbnail(keyword: string): Promise<string | undefined> {
+  const apiKey = process.env.YOUTUBE_API_KEY;
+  if (!apiKey) return undefined;
+
+  try {
+    const url = [
+      'https://www.googleapis.com/youtube/v3/search',
+      '?part=snippet',
+      `&q=${encodeURIComponent(keyword)}`,
+      '&type=video',
+      '&maxResults=1',
+      '&safeSearch=moderate',
+      `&key=${apiKey}`,
+    ].join('');
+
+    const res = await fetch(url, { signal: AbortSignal.timeout(6_000) });
+    if (!res.ok) return undefined;
+
+    const data = await res.json() as {
+      items?: Array<{
+        snippet?: {
+          thumbnails?: {
+            high?: { url?: string };
+            medium?: { url?: string };
+          };
+        };
+      }>;
+    };
+
+    const thumb =
+      data?.items?.[0]?.snippet?.thumbnails?.high?.url ??
+      data?.items?.[0]?.snippet?.thumbnails?.medium?.url;
+
+    if (thumb && !usedImageUrls.has(thumb)) {
+      usedImageUrls.add(thumb);
+      return thumb;
+    }
+  } catch {
+    // Silent — network or quota errors
+  }
+  return undefined;
+}
+
+/**
  * Fetch a topic-relevant image for `keyword`.
  *
  * Resolution chain:
- *   1. Wikipedia pageimages API — great for named entities (people, places, films)
- *   2. Bing News RSS thumbnail — great for trending events and news topics
- *   3. Returns undefined → classifyTrend calls getSmartFallbackImage() → curated Unsplash
+ *   1. YouTube Data API search thumbnail — most visually specific for any trending topic
+ *   2. Wikipedia pageimages API — great for named entities (people, places, films)
+ *   3. Bing News RSS thumbnail — great for trending events and news topics
+ *   4. Returns undefined → classifyTrend calls getSmartFallbackImage() → curated Unsplash
  *
  * Retries Wikipedia once on network failure.
  * Deduplicates returned URLs across the current run.
@@ -84,7 +133,12 @@ export async function fetchTopicImage(keyword: string): Promise<string | undefin
     .trim();
   if (!clean || clean.length < 2) return undefined;
 
-  // ── 1. Wikipedia pageimages API ──────────────────────────────────────────────
+  // ── 1. YouTube search thumbnail ──────────────────────────────────────────────
+  // Best for Reddit text posts, meme topics, discussions — always visually specific
+  const ytThumb = await fetchYouTubeThumbnail(clean);
+  if (ytThumb) return ytThumb;
+
+  // ── 2. Wikipedia pageimages API ──────────────────────────────────────────────
   const wikiUrl = [
     'https://en.wikipedia.org/w/api.php',
     '?action=query&generator=search',
