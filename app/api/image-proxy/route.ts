@@ -10,16 +10,51 @@ import { NextRequest, NextResponse } from 'next/server';
  * Also adds aggressive caching headers so the browser doesn't re-fetch.
  */
 
+// Domains explicitly known to host images we use
 const ALLOWED_DOMAINS = [
+  // Instagram
   'scontent.cdninstagram.com',
   'cdninstagram.com',
   'instagram.com',
   'fbcdn.net',
-  'scontent-',               // All scontent-*.cdninstagram.com variants
+  // Reddit
   'i.redd.it',
   'preview.redd.it',
+  'external-preview.redd.it',
+  // YouTube thumbnails
   'i.ytimg.com',
+  'img.youtube.com',
+  // Wikipedia / Wikimedia
+  'upload.wikimedia.org',
+  'wikipedia.org',
+  // Bing News thumbnails
+  'th.bing.com',
+  'bing.com',
+  'msn.com',
+  // Google News / Google Images
+  'news.google.com',
+  'lh3.googleusercontent.com',
+  'encrypted-tbn0.gstatic.com',
+  // Common news CDNs
+  'images.hindustantimes.com',
+  'akm-img-a-in.tosshub.com',
+  'feeds.abplive.com',
+  'static.toiimg.com',
+  'ndtvimg.com',
+  'images.news18.com',
+  'images.indianexpress.com',
+  'images.livemint.com',
+  'images.financialexpress.com',
+  'bsmedia.business-standard.com',
+  'timesofindia.indiatimes.com',
+  'economictimes.indiatimes.com',
+  'img.etimg.com',
+  // Unsplash
   'images.unsplash.com',
+  // Generic image hosts
+  'pbs.twimg.com',
+  'media.tenor.com',
+  'i.imgur.com',
 ];
 
 export async function GET(request: NextRequest) {
@@ -32,8 +67,11 @@ export async function GET(request: NextRequest) {
   try {
     const parsed = new URL(url);
 
-    // Security: only proxy from known image CDN domains
-    const isAllowed = ALLOWED_DOMAINS.some(d => parsed.hostname.includes(d));
+    // Security: only proxy from known image domains OR https URLs that look like images
+    const isAllowed =
+      ALLOWED_DOMAINS.some(d => parsed.hostname.includes(d)) ||
+      /\.(jpg|jpeg|png|webp|gif|avif)($|\?)/i.test(parsed.pathname);
+
     if (!isAllowed) {
       return NextResponse.json({ error: 'Domain not allowed' }, { status: 403 });
     }

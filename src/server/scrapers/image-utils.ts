@@ -125,6 +125,12 @@ async function fetchYouTubeThumbnail(keyword: string): Promise<string | undefine
  * Retries Wikipedia once on network failure.
  * Deduplicates returned URLs across the current run.
  */
+/** Wrap any external image URL through our server-side proxy to avoid hotlink blocks */
+function proxyUrl(url: string): string {
+  if (url.startsWith('/')) return url; // already local
+  return `/api/image-proxy?url=${encodeURIComponent(url)}`;
+}
+
 export async function fetchTopicImage(keyword: string): Promise<string | undefined> {
   const clean = keyword
     .replace(/^#/, '')
@@ -136,7 +142,7 @@ export async function fetchTopicImage(keyword: string): Promise<string | undefin
   // ── 1. YouTube search thumbnail ──────────────────────────────────────────────
   // Best for Reddit text posts, meme topics, discussions — always visually specific
   const ytThumb = await fetchYouTubeThumbnail(clean);
-  if (ytThumb) return ytThumb;
+  if (ytThumb) return proxyUrl(ytThumb);
 
   // ── 2. Wikipedia pageimages API ──────────────────────────────────────────────
   const wikiUrl = [
@@ -158,7 +164,7 @@ export async function fetchTopicImage(keyword: string): Promise<string | undefin
           ?.thumbnail?.source;
         if (src && !usedImageUrls.has(src)) {
           usedImageUrls.add(src);
-          return src;
+          return proxyUrl(src);
         }
       }
     } catch {
@@ -166,10 +172,10 @@ export async function fetchTopicImage(keyword: string): Promise<string | undefin
     }
   }
 
-  // ── 2. Bing News RSS thumbnail ───────────────────────────────────────────────
+  // ── 3. Bing News RSS thumbnail ──────────────────────────────────────────────
   const bingImage = await fetchBingNewsImage(clean);
-  if (bingImage) return bingImage;
+  if (bingImage) return proxyUrl(bingImage);
 
-  // ── 3. Return undefined → classifier uses curated Unsplash fallback ──────────
+  // ── 4. Return undefined → classifier uses curated Unsplash fallback ──────────
   return undefined;
 }
