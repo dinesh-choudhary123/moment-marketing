@@ -11,23 +11,23 @@ const APIFY_BASE = 'https://api.apify.com/v2';
 const FRESHNESS_WINDOW_MS = 48 * 60 * 60 * 1000;
 const RSS_FRESHNESS_WINDOW_MS = 72 * 60 * 60 * 1000;
 
-// Top 15 high-reach Indian pages for trending content
+// Indian news/entertainment + marketing & advertising pages
 const TRENDING_PAGES = [
-  'https://www.facebook.com/ndtv',
-  'https://www.facebook.com/TimesofIndia',
-  'https://www.facebook.com/india.today',
+  // Indian news & entertainment
   'https://www.facebook.com/IPL',
   'https://www.facebook.com/ESPNcricinfo',
   'https://www.facebook.com/bollywoodhungama',
-  'https://www.facebook.com/aajtak',
-  'https://www.facebook.com/zeenews',
   'https://www.facebook.com/pinkvilla',
-  'https://www.facebook.com/SportsKeedaOfficial',
+  'https://www.facebook.com/TimesofIndia',
+  'https://www.facebook.com/india.today',
   'https://www.facebook.com/economictimes',
-  'https://www.facebook.com/LiveHindustan',
-  'https://www.facebook.com/narendramodi',
-  'https://www.facebook.com/thehindu',
-  'https://www.facebook.com/HindustanTimes',
+  'https://www.facebook.com/gadgets360',
+  // Marketing & advertising pages
+  'https://www.facebook.com/adweek',
+  'https://www.facebook.com/adsoftheworld',
+  'https://www.facebook.com/campaignasia',
+  'https://www.facebook.com/afaqs',
+  'https://www.facebook.com/exchangeformedia',
 ];
 
 // ─── RSS sources (fallback) ───────────────────────────────────────────────────
@@ -332,7 +332,7 @@ function scoreRSSItem(item: RSSItem): number {
   if (/bollywood|film|movie|actor|actress/.test(combined)) score += 9;
   if (/viral|trending|massive|shocking|breaking/.test(combined)) score += 6;
   if (/budget|economy|sensex|market|rbi/.test(combined)) score += 7;
-  if (/election|politic|minister|modi/.test(combined)) score += 5;
+  if (/election|politic|minister|modi|bjp|congress|aap|vote/.test(combined)) score -= 15;
   if (/tech|ai|startup|isro|phone/.test(combined)) score += 5;
   if (item.pubTimestamp) {
     const ageHours = (Date.now() - item.pubTimestamp) / 3_600_000;

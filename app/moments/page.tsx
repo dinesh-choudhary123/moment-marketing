@@ -70,6 +70,11 @@ function MomentsPageInner() {
     onError: e => toast(e.message, 'error'),
   });
 
+  const scrapeYouTube = trpc.scraper.scrapeYouTube.useMutation({
+    onSuccess: d => onSuccess(d.message),
+    onError: e => toast(e.message, 'error'),
+  });
+
   const isRunning = scraperStatus?.isRunning || scrapeAll.isPending;
   const skeletons = Array(12).fill(0);
 
@@ -130,6 +135,17 @@ function MomentsPageInner() {
               >
                 <RefreshCw className={cn('w-3.5 h-3.5', scrapeFacebook.isPending && 'animate-spin')} />
                 Facebook
+              </Button>
+
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={scrapeYouTube.isPending}
+                onClick={() => scrapeYouTube.mutate()}
+                title="Fetch YouTube trending videos"
+              >
+                <RefreshCw className={cn('w-3.5 h-3.5', scrapeYouTube.isPending && 'animate-spin')} />
+                YouTube
               </Button>
 
               {/* Refresh all */}

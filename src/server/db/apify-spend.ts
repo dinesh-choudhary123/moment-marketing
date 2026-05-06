@@ -10,7 +10,7 @@ import { join } from 'path';
 
 const LEDGER_PATH = join(process.cwd(), '.apify-spend.json');
 const LEDGER_TMP = LEDGER_PATH + '.tmp';
-export const DAILY_CAP_USD = 2.0;
+export const DAILY_CAP_USD = 3.0;
 
 // Published Apify per-result pricing (pay-per-event actors).
 export const COST_PER_ITEM: Record<ApifyActor, number> = {

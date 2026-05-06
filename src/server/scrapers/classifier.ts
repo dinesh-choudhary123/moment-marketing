@@ -28,6 +28,14 @@ const BRAND_UNSAFE_KEYWORDS = [
   'harassment', 'controversy', 'outrage', 'boycott called', 'hate speech',
   // Medical negative
   'epidemic', 'pandemic', 'disease outbreak', 'cancer death', 'hospital critical',
+  // Political elections — brands universally avoid election association (alienates voters)
+  'election result', 'electionresult', 'election2026', 'vote count', 'exit poll',
+  'polling booth', 'constituency', 'bjp wins', 'congress wins', 'aap wins',
+  'chooses dada', 'chooses didi', 'bhabanipur', 'विधानसभा', 'निर्वाचन', 'चुनाव',
+  // News channels / media handles — not marketing moments
+  'ytchannel', 'news channel', 'breaking news', 'live news',
+  // Social causes that put brands in a bind
+  'दहेज', 'dowry', 'harassment campaign', 'दहेज मुक्त',
 ];
 
 // ─── Commercial opportunity boost ───────────────────────────────────────────
@@ -476,12 +484,33 @@ function getSmartFallbackImage(name: string, description: string, category: Mome
 export function classifyTrend(raw: RawTrend): Moment | null {
   const description = raw.description ?? `Trending on ${raw.platform} with score ${raw.trendingScore}`;
 
-  // Note: brand-safety check removed — show ALL real trending topics so users
-  // can make their own judgement. isBrandSafe() is kept for reference only.
-  void isBrandSafe; // prevent unused-variable warning
+  // Brand-safety filter — skip content about death, violence, tragedy, scandal.
+  // These topics actively harm brand reputation when associated in moment marketing.
+  // YouTube thumbnails and entertainment trends are typically safe; news/political
+  // content about real incidents may trigger this.
+  if (!isBrandSafe(raw.name, description)) {
+    console.log(`[Classifier] Filtered unsafe: "${raw.name.slice(0, 60)}"`);
+    return null;
+  }
 
   const category = classifyCategory(raw.name, description);
   const commercialBoost = getCommercialBoost(raw.name, description);
+
+  // Moment-marketing relevance filter for non-YouTube sources.
+  // YouTube trending videos are inherently brand-relevant (high viewership moments).
+  // Reddit/Twitter/Google often surface news/political content with no marketing angle.
+  if (raw.platform !== 'YouTube') {
+    // Politics: only keep if it has a clear commercial angle (budget, GST, market policy)
+    if (category === 'Politics') {
+      const hasBrandAngle = /budget|gst|tax|policy|startup|msme|digital india|upi|fintech/.test(
+        (raw.name + ' ' + description).toLowerCase(),
+      );
+      if (!hasBrandAngle) return null;
+    }
+    // Finance/Health: drop low-score items (niche, not actionable at brand scale)
+    if ((category === 'Finance' || category === 'Health') && raw.trendingScore < 60) return null;
+  }
+
   const finalScore = Math.min(100, raw.trendingScore + commercialBoost);
   const tags = extractTags(raw.name, description, category);
 
@@ -509,7 +538,9 @@ export function classifyTrend(raw: RawTrend): Moment | null {
   // Local paths (/images/ig/*, /api/image-proxy*) are always trusted.
   // External URLs from known-blocked CDNs get replaced with Unsplash fallbacks.
   // Instagram images should be locally cached by the scraper, not raw CDN URLs.
-  const blockedDomains = ['scontent.cdninstagram.com', 'instagram.com/p/', 'preview.redd.it', 'external-preview.redd.it'];
+  // Instagram CDN blocks browser hotlinking — those must come via /api/image-proxy
+  // Reddit preview.redd.it URLs are always wrapped in /api/image-proxy by the scraper (isLocalOrProxy catches them)
+  const blockedDomains = ['scontent.cdninstagram.com', 'instagram.com/p/'];
   const isLocalOrProxy = raw.imageUrl && (raw.imageUrl.startsWith('/images/') || raw.imageUrl.startsWith('/api/'));
   const providedImage = raw.imageUrl && (isLocalOrProxy || !blockedDomains.some(d => raw.imageUrl!.includes(d)))
     ? raw.imageUrl

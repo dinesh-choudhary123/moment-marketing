@@ -2,9 +2,10 @@ import type { Moment } from '@/types';
 import { classifyTrend } from './classifier';
 import { fetchTopicImage } from './image-utils';
 
-// ─── Reddit r/all/hot — single lightweight call, no auth needed ───────────────
-// Returns the 25 hottest posts across all of Reddit right now.
-// Image: data.thumbnail (if not a sentinel) → data.preview.images[0].source.url → fetchTopicImage
+// ─── Reddit India multi-subreddit hot — no auth needed ───────────────────────
+// Fetches trending posts from India-relevant subreddits for moment marketing.
+// Subreddits: india, bollywood, cricket, IPL, IndianMemes, technology, Damnthatsinteresting
+// Image: data.preview.images[0].source.url → direct url → data.thumbnail (last resort) → fetchTopicImage
 
 const HEADERS = { 'User-Agent': 'MomentMarketing/2.0 (by /u/momentmarketing)' };
 
@@ -34,7 +35,17 @@ interface RedditListing {
 
 /** Extract a real image URL from a Reddit post — no fetchTopicImage fallback here. */
 function extractDirectImage(d: RedditPost): string | undefined {
-  // 1. thumbnail — valid https URL that isn't a Reddit sentinel
+  // 1. preview image (full-quality post image) — HTML-decode &amp;
+  // This is the actual post photo/meme at full resolution, far better than the thumbnail
+  const previewUrl = d.preview?.images?.[0]?.source?.url;
+  if (previewUrl) return previewUrl.replace(/&amp;/g, '&');
+
+  // 2. direct image URL (i.redd.it, i.imgur.com, etc.)
+  if (d.url && /\.(jpg|jpeg|png|webp|gif)$/i.test(d.url)) {
+    return d.url;
+  }
+
+  // 3. thumbnail — last resort (tiny 70px crops, often subreddit icons)
   if (
     d.thumbnail &&
     d.thumbnail.startsWith('https://') &&
@@ -43,36 +54,60 @@ function extractDirectImage(d: RedditPost): string | undefined {
     return d.thumbnail;
   }
 
-  // 2. preview image — HTML-decode &amp; (Reddit escapes & in JSON-inside-HTML contexts)
-  const previewUrl = d.preview?.images?.[0]?.source?.url;
-  if (previewUrl) return previewUrl.replace(/&amp;/g, '&');
-
-  // 3. direct image URL
-  if (d.url && /\.(jpg|jpeg|png|webp|gif)$/i.test(d.url)) {
-    return d.url;
-  }
-
   return undefined;
+}
+
+// Marketing keyword search query — same hashtags used on Instagram
+const MARKETING_SEARCH_QUERY = 'momentmarketing OR "moment marketing" OR creativeads OR "creative advertising" OR marketingmentor OR "outdoor advertising" OR kitkat OR advertising';
+
+async function fetchRedditByKeywords(): Promise<RedditPost[]> {
+  try {
+    const url = `https://www.reddit.com/search.json?q=${encodeURIComponent(MARKETING_SEARCH_QUERY)}&sort=top&t=week&limit=25`;
+    const res = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(12_000) });
+    if (!res.ok) { console.warn(`[Reddit] keyword search returned ${res.status}`); return []; }
+    const data = await res.json() as RedditListing;
+    const posts = (data.data?.children ?? []).map(c => c.data!).filter((d): d is RedditPost => !!d && !!d.title);
+    console.log(`[Reddit] marketing keyword search → ${posts.length} posts`);
+    return posts;
+  } catch (e) {
+    console.warn('[Reddit] keyword search failed:', (e as Error).message);
+    return [];
+  }
 }
 
 export async function fetchRedditTrends(): Promise<Moment[]> {
   try {
-    const res = await fetch('https://www.reddit.com/r/all/hot.json?limit=25', {
-      headers: HEADERS,
-      signal: AbortSignal.timeout(15_000),
-    });
+    // India subreddits + marketing subreddits in parallel with keyword search
+    const subreddits = 'india+bollywood+cricket+IPL+IndianMemes+technology+Damnthatsinteresting+marketing+advertising+branding+DigitalMarketing+socialmediamarketing';
+    const [hotRes, keywordPosts] = await Promise.all([
+      fetch(`https://www.reddit.com/r/${subreddits}/hot.json?limit=30`, {
+        headers: HEADERS,
+        signal: AbortSignal.timeout(15_000),
+      }),
+      fetchRedditByKeywords(),
+    ]);
 
-    if (!res.ok) {
-      console.warn(`[Reddit] r/all/hot returned ${res.status}`);
+    if (!hotRes.ok) {
+      console.warn(`[Reddit] multi-subreddit hot returned ${hotRes.status}`);
       return [];
     }
 
-    const data = await res.json() as RedditListing;
-    const posts = (data.data?.children ?? [])
+    const data = await hotRes.json() as RedditListing;
+    const hotPosts = (data.data?.children ?? [])
       .map(c => c.data!)
       .filter((d): d is RedditPost => !!d && !!d.title);
 
-    console.log(`[Reddit] r/all/hot → ${posts.length} posts`);
+    // Merge: hot posts first, then keyword posts — dedupe by title
+    const seenTitles = new Set(hotPosts.map(p => (p.title ?? '').toLowerCase().slice(0, 60)));
+    const uniqueKeyword = keywordPosts.filter(p => {
+      const key = (p.title ?? '').toLowerCase().slice(0, 60);
+      if (seenTitles.has(key)) return false;
+      seenTitles.add(key);
+      return true;
+    });
+    const posts = [...hotPosts, ...uniqueKeyword];
+
+    console.log(`[Reddit] ${hotPosts.length} hot + ${uniqueKeyword.length} marketing keyword posts = ${posts.length} total`);
 
     // Resolve images in parallel: proxy the direct post image or use fetchTopicImage fallback
     const imageUrls = await Promise.all(

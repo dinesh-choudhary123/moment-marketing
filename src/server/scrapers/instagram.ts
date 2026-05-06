@@ -21,12 +21,12 @@ const APIFY_BASE = 'https://api.apify.com/v2';
 // If timestamp field is ABSENT, posts are INCLUDED (don't silently drop them).
 const FRESHNESS_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
-// Seed hashtags — used when Google Trends returns nothing or all non-Latin.
+// Seed hashtags — moment marketing tags first, then India trend categories.
 // These always have fresh posts on Instagram.
+// Only scrape these exact hashtags — specified by user
 const SEED_HASHTAGS = [
-  'ipl', 'ipl2026', 'cricket', 'bollywood', 'india', 'trending',
-  'viral', 'reels', 'indianews', 'entertainment', 'music', 'fashion',
-  'food', 'travel', 'sports', 'technology',
+  'momentmarketing', 'moment', 'marketingmentor', 'kitkat',
+  'advertising', 'outdooradvertising', 'marketing', 'creativeads',
 ];
 
 // We previously had hardcoded celebrity profiles here, but that skewed trends 
@@ -203,6 +203,107 @@ async function postsToMoments(posts: InstagramPost[]): Promise<Moment[]> {
     .filter((m): m is NonNullable<typeof m> => m !== null);
 }
 
+// ─── Instagram mobile web API (no token needed) ──────────────────────────────
+// Uses the same endpoint Instagram's Android app calls for hashtag explore.
+// No auth required for public hashtags — returns posts with full image URLs.
+
+interface IGMobileMedia {
+  id?: string;
+  caption?: { text?: string };
+  image_versions2?: { candidates?: Array<{ url?: string; width?: number; height?: number }> };
+  carousel_media?: Array<{ image_versions2?: { candidates?: Array<{ url?: string }> } }>;
+  like_count?: number;
+  comment_count?: number;
+  view_count?: number;
+  video_view_count?: number;
+  taken_at?: number;
+  user?: { username?: string; full_name?: string };
+  media_type?: number; // 1 = photo, 2 = video, 8 = carousel
+}
+
+interface IGMobileSectionMedia {
+  media?: IGMobileMedia;
+}
+
+interface IGMobileSection {
+  layout_content?: { medias?: IGMobileSectionMedia[] };
+}
+
+interface IGMobileTagResponse {
+  sections?: IGMobileSection[];
+  more_available?: boolean;
+}
+
+function igMediaToPost(m: IGMobileMedia): InstagramPost | null {
+  if (!m.id) return null;
+
+  // Pick the best image: first candidate (highest res) or first carousel image
+  const candidates = m.image_versions2?.candidates ?? [];
+  const carouselFirst = m.carousel_media?.[0]?.image_versions2?.candidates?.[0]?.url;
+  const imageUrl = candidates[0]?.url ?? carouselFirst;
+
+  const caption = m.caption?.text ?? '';
+  const hashtags = (caption.match(/#\w+/g) ?? []).map(h => h.replace('#', ''));
+
+  return {
+    id: m.id,
+    caption,
+    hashtags,
+    displayUrl: imageUrl,
+    likesCount: m.like_count ?? 0,
+    commentsCount: m.comment_count ?? 0,
+    videoViewCount: m.video_view_count ?? m.view_count,
+    ownerUsername: m.user?.username,
+    ownerFullName: m.user?.full_name,
+    type: m.media_type === 2 ? 'Video' : 'Image',
+    taken_at: m.taken_at,
+  };
+}
+
+async function fetchInstagramViaWebAPI(hashtags: string[]): Promise<InstagramPost[]> {
+  const allPosts: InstagramPost[] = [];
+  const headers = {
+    'User-Agent': 'Instagram 123.0.0.21.114 Android (26/8.0.0; 480dpi; 1080x1920; OnePlus; ONEPLUS A3010; OnePlus3T; qcom; en_US; 123444975)',
+    'X-IG-App-ID': '936619743392459',
+    Accept: '*/*',
+  };
+
+  for (const tag of hashtags) {
+    try {
+      const url = `https://i.instagram.com/api/v1/tags/${encodeURIComponent(tag)}/sections/?count=20&surface=explore`;
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
+
+      if (!res.ok) {
+        // 401/403 = auth required (Instagram tightening) — stop trying further tags
+        if (res.status === 401 || res.status === 403) {
+          console.warn(`[Instagram] Mobile API requires auth (${res.status}) — skipping`);
+          break;
+        }
+        console.warn(`[Instagram] Mobile API ${tag}: ${res.status}`);
+        continue;
+      }
+
+      const data = await res.json() as IGMobileTagResponse;
+      const medias = (data.sections ?? [])
+        .flatMap(s => s.layout_content?.medias ?? [])
+        .map(sm => sm.media)
+        .filter((m): m is IGMobileMedia => !!m);
+
+      const posts = medias.map(igMediaToPost).filter((p): p is InstagramPost => p !== null);
+      allPosts.push(...posts);
+      console.log(`[Instagram] Mobile API #${tag} → ${posts.length} posts`);
+
+      // Small delay to avoid rate limiting between hashtag requests
+      await new Promise(r => setTimeout(r, 300));
+    } catch (e) {
+      console.warn(`[Instagram] Mobile API #${tag} failed:`, (e as Error).message);
+    }
+  }
+
+  console.log(`[Instagram] Mobile API total: ${allPosts.length} posts from ${hashtags.length} hashtags`);
+  return allPosts;
+}
+
 // ─── Apify helper ─────────────────────────────────────────────────────────────
 
 async function runInstagramScraper(
@@ -218,30 +319,78 @@ async function runInstagramScraper(
     return [];
   }
 
-  console.log(`[Instagram] ${label}: running (budget reserved: $${reservation.reservedUsd.toFixed(3)})...`);
+  console.log(`[Instagram] ${label}: starting async run (budget reserved: $${reservation.reservedUsd.toFixed(3)})...`);
 
-  let posts: InstagramPost[] = [];
+  // Use async run + polling instead of run-sync (sync drops connection after ~2 min)
+  let runId: string;
   try {
-    const res = await fetch(
-      `${APIFY_BASE}/acts/apify~instagram-scraper/run-sync-get-dataset-items?timeout=300&format=json`,
+    const startRes = await fetch(
+      `${APIFY_BASE}/acts/apify~instagram-scraper/runs?token=${token}`,
       {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...input, maxRequestRetries: 3 }),
-        signal: AbortSignal.timeout(310_000),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...input, maxRequestRetries: 2 }),
+        signal: AbortSignal.timeout(30_000),
       },
     );
-
-    if (!res.ok) {
-      const text = await res.text();
-      console.error(`[Instagram] ${label} error ${res.status}:`, text.slice(0, 300));
+    if (!startRes.ok) {
+      console.error(`[Instagram] ${label} start error ${startRes.status}`);
       await releaseReservation(reservation);
       return [];
     }
-
-    posts = (await res.json()) as InstagramPost[];
+    const startData = await startRes.json() as { data?: { id?: string } };
+    runId = startData.data?.id ?? '';
+    if (!runId) {
+      console.error(`[Instagram] ${label}: no run ID returned`);
+      await releaseReservation(reservation);
+      return [];
+    }
+    console.log(`[Instagram] ${label}: run ${runId} started — polling...`);
   } catch (e) {
-    console.error(`[Instagram] ${label} failed:`, e);
+    console.error(`[Instagram] ${label} start failed:`, e);
+    await releaseReservation(reservation);
+    return [];
+  }
+
+  // Poll every 10s, up to 8 minutes
+  const deadline = Date.now() + 8 * 60 * 1000;
+  let status = 'RUNNING';
+  while (Date.now() < deadline && (status === 'RUNNING' || status === 'READY')) {
+    await new Promise(r => setTimeout(r, 10_000));
+    try {
+      const statusRes = await fetch(
+        `${APIFY_BASE}/actor-runs/${runId}?token=${token}`,
+        { signal: AbortSignal.timeout(10_000) },
+      );
+      if (statusRes.ok) {
+        const statusData = await statusRes.json() as { data?: { status?: string } };
+        status = statusData.data?.status ?? 'RUNNING';
+        console.log(`[Instagram] ${label}: run status = ${status}`);
+      }
+    } catch { /* network hiccup — retry next poll */ }
+  }
+
+  if (status !== 'SUCCEEDED') {
+    console.error(`[Instagram] ${label}: run ended with status ${status}`);
+    await releaseReservation(reservation);
+    return [];
+  }
+
+  // Fetch dataset results
+  let posts: InstagramPost[] = [];
+  try {
+    const dataRes = await fetch(
+      `${APIFY_BASE}/actor-runs/${runId}/dataset/items?token=${token}&format=json&limit=${reservation.safeLimit}`,
+      { signal: AbortSignal.timeout(30_000) },
+    );
+    if (!dataRes.ok) {
+      console.error(`[Instagram] ${label} dataset fetch error ${dataRes.status}`);
+      await releaseReservation(reservation);
+      return [];
+    }
+    posts = (await dataRes.json()) as InstagramPost[];
+  } catch (e) {
+    console.error(`[Instagram] ${label} dataset fetch failed:`, e);
     await releaseReservation(reservation);
     return [];
   }
@@ -369,48 +518,53 @@ async function googleTrendsToMoments(topics: TrendingTopic[]): Promise<Moment[]>
 export async function fetchInstagramTrends(): Promise<Moment[]> {
   const token = process.env.APIFY_TOKEN;
 
-  // Always fetch Google Trends first — it's free and seeds hashtags + fallback
-  const topics = await fetchGoogleTrendsIndia();
-
-  // Build final hashtag list: Google Trends topics + always-on seeds, deduped
-  const gtHashtags = topics
-    .map(t => toHashtag(t.name))
-    .filter(h => h.length >= 2);
-  const allHashtags = [...new Set([...gtHashtags, ...SEED_HASHTAGS])];
-  console.log(`[Instagram] ${allHashtags.length} hashtags ready (${gtHashtags.length} from trends + ${SEED_HASHTAGS.length} seeds)`);
-
   if (token) {
-    // ── Path 1: Hashtag search ──────────────────────────────────────────────
-    // Use top 20 hashtags, 25 posts each → up to 500 posts
-    // This deep pool allows our virality algorithm to sift past the 
-    // celebrity posts and find the true breakout organic trends.
-    const top20 = allHashtags.slice(0, 20);
+    // ── Path 1: Apify directUrls hashtag scraping ──────────────────────────
+    // Uses directUrls pointing to hashtag explore pages — searchHashtags is
+    // deprecated in current actor versions and returns near-zero results.
+    const scrapeHashtags = SEED_HASHTAGS; // momentmarketing, moment, marketingmentor, kitkat, advertising, outdooradvertising, marketing, creativeads
+    const directUrls = scrapeHashtags.map(h => `https://www.instagram.com/explore/tags/${encodeURIComponent(h)}/`);
+
     const hashtagPosts = await runInstagramScraper(
       token,
       {
-        searchHashtags: top20,
+        directUrls,
         resultsType: 'posts',
-        resultsLimit: 25,        // 25 posts per hashtag
+        resultsLimit: 30,           // 30 posts per hashtag
+        proxy: { useApifyProxy: true },
       },
-      'hashtag-search',
-      top20.length * 25,         // reserve for up to 500 posts
-      5,                         // min viable = 5 posts
+      `hashtag-explore (#momentmarketing #moment #marketing #advertising …)`,
+      scrapeHashtags.length * 30,   // 8 hashtags × 30 posts = 240 max
+      5,
     );
 
     if (hashtagPosts.length > 0) {
       const moments = await postsToMoments(hashtagPosts);
       if (moments.length > 0) {
-        console.log(`[Instagram] ✓ ${moments.length} moments via hashtag search`);
+        console.log(`[Instagram] ✓ ${moments.length} moments via Apify hashtag explore`);
         return moments;
       }
-      console.warn('[Instagram] Hashtag search returned 0 — using Google Trends fallback');
+      console.warn('[Instagram] Apify hashtag explore returned 0 moments after filtering');
     }
-  } else {
-    console.warn('[Instagram] APIFY_TOKEN not set — using Google Trends fallback');
+  }
+
+  // ── Path 2: Instagram mobile web API (no APIFY_TOKEN needed) ───────────────
+  // Uses the same endpoint Instagram's Android app calls for hashtag explore.
+  // Priority hashtags: moment marketing specific first, then India trending.
+  const mobileHashtags = SEED_HASHTAGS;
+  const mobilePosts = await fetchInstagramViaWebAPI(mobileHashtags);
+  if (mobilePosts.length > 0) {
+    const moments = await postsToMoments(mobilePosts);
+    if (moments.length > 0) {
+      console.log(`[Instagram] ✓ ${moments.length} moments via mobile web API`);
+      return moments;
+    }
+    console.warn('[Instagram] Mobile web API returned posts but 0 moments after filtering');
   }
 
   // ── Path 3: Google Trends fallback ─────────────────────────────────────────
   // Free, always available, guaranteed results when Google Trends is up.
+  const topics = await fetchGoogleTrendsIndia();
   const moments = await googleTrendsToMoments(topics);
   if (moments.length > 0) {
     console.log(`[Instagram] ✓ ${moments.length} moments via Google Trends fallback`);

@@ -916,10 +916,11 @@ function seedHistoricalData() {
 seedHistoricalData();
 
 // Trigger live scrape on first server import (deferred to avoid circular deps)
-let startupScheduled = false;
+// Use global to survive HMR reloads in Next.js dev mode
+const g = global as typeof globalThis & { _mmStartupScheduled?: boolean };
 export function scheduleStartupScrape() {
-  if (startupScheduled) return;
-  startupScheduled = true;
+  if (g._mmStartupScheduled) return;
+  g._mmStartupScheduled = true;
   setImmediate(() => {
     import('@/server/scrapers/index').then(({ runOnStartup }) => runOnStartup());
   });

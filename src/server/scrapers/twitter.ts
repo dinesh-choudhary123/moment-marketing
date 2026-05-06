@@ -47,7 +47,10 @@ async function fetchViaApify(token: string): Promise<Moment[]> {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          searchTerms: ['trending India'],
+          searchTerms: [
+            'trending India',
+            '#momentmarketing OR #marketing OR #advertising OR #creativeads OR #outdooradvertising',
+          ],
           tweetsDesiredCount: reservation.safeLimit,
           addUserInfo: false,
           proxyConfig: { useApifyProxy: true },

@@ -57,8 +57,14 @@ const ALLOWED_DOMAINS = [
   'i.imgur.com',
 ];
 
+// YouTube grey placeholder images (no thumbnail set / video still processing) are
+// served as valid 200 JPEGs but are tiny — real hqdefault thumbnails are always >5KB.
+const YT_PLACEHOLDER_THRESHOLD_BYTES = 5000;
+const YT_FALLBACK_IMAGE = 'https://images.unsplash.com/photo-1611162616475-46b635cb6868?w=480&auto=format&fit=crop';
+
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get('url');
+  const isYouTube = request.nextUrl.searchParams.get('yt') === '1';
 
   if (!url) {
     return NextResponse.json({ error: 'Missing url parameter' }, { status: 400 });
@@ -92,6 +98,28 @@ export async function GET(request: NextRequest) {
 
     const contentType = res.headers.get('content-type') ?? 'image/jpeg';
     const buffer = await res.arrayBuffer();
+
+    // YouTube grey placeholder detection: real thumbnails are always >5KB.
+    // Tiny files are the "no thumbnail" grey image — fetch and proxy the fallback directly
+    // (redirect doesn't work because next/image won't follow to external domains).
+    if (isYouTube && buffer.byteLength < YT_PLACEHOLDER_THRESHOLD_BYTES) {
+      try {
+        const fallbackRes = await fetch(YT_FALLBACK_IMAGE, {
+          signal: AbortSignal.timeout(8000),
+        });
+        if (fallbackRes.ok) {
+          const fallbackBuf = await fallbackRes.arrayBuffer();
+          return new NextResponse(fallbackBuf, {
+            status: 200,
+            headers: {
+              'Content-Type': fallbackRes.headers.get('content-type') ?? 'image/jpeg',
+              'Cache-Control': 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400',
+              'Access-Control-Allow-Origin': '*',
+            },
+          });
+        }
+      } catch { /* fall through to serving the grey image */ }
+    }
 
     return new NextResponse(buffer, {
       status: 200,

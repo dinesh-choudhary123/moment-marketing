@@ -1,9 +1,10 @@
+import fs from 'fs';
+import path from 'path';
 import type { Moment, Platform } from '@/types';
 import { momentsStore, scraperStatus } from '@/server/db/store';
 import { formatSpendSummary } from '@/server/db/apify-spend';
 import { resetImageDedup } from './image-utils';
 import { fetchTwitterTrends } from './twitter';
-import { fetchYouTubeTrends } from './youtube';
 import { fetchRedditTrends } from './reddit';
 import { fetchInstagramTrends } from './instagram';
 import { fetchFacebookTrends } from './facebook';
@@ -26,30 +27,40 @@ export async function runAllScrapers(): Promise<{ added: number; total: number; 
   resetImageDedup();
 
   try {
+    // YouTube is intentionally excluded from startup — its Data API quota (10k units/day)
+    // is consumed on every cold start. YouTube is fetched on-demand via the YouTube button.
+    // All other scrapers here are free/unlimited and safe to run automatically.
     const results = await Promise.allSettled([
       fetchTwitterTrends(),
-      fetchYouTubeTrends(),
       fetchRedditTrends(),
       fetchInstagramTrends(),
       fetchFacebookTrends(),
       fetchGoogleTrends(),
     ]);
 
-    const allMoments: Moment[] = [];
-    for (const result of results) {
-      if (result.status === 'fulfilled') {
-        allMoments.push(...result.value);
-      } else {
+    const platformResults: Map<Platform, Moment[]> = new Map();
+    const scraperPlatforms: Platform[] = ['Twitter', 'Reddit', 'Instagram', 'Facebook', 'Google'];
+
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i];
+      if (result.status === 'fulfilled' && result.value.length > 0) {
+        platformResults.set(scraperPlatforms[i], result.value);
+      } else if (result.status === 'rejected') {
         console.error('Scraper failed:', result.reason);
       }
+      // If fulfilled but empty (e.g. quota exceeded), keep existing moments for that platform
     }
 
-    // Remove previously scraped (non-custom) moments before re-inserting fresh ones
+    // Only remove moments for platforms that returned fresh data
     for (const [id, m] of momentsStore.entries()) {
-      if (!m.isCustom && !id.startsWith('hist_') && !id.startsWith('pred_')) momentsStore.delete(id);
+      if (m.isCustom || id.startsWith('hist_') || id.startsWith('pred_')) continue;
+      if (m.platforms.some(p => platformResults.has(p))) momentsStore.delete(id);
     }
 
-    // Dedupe by name and insert
+    // Dedupe by name and insert fresh results
+    const allMoments: Moment[] = [];
+    for (const moments of platformResults.values()) allMoments.push(...moments);
+
     const seen = new Set<string>();
     let added = 0;
     const byPlatform: Partial<Record<Platform, number>> = {};
@@ -74,11 +85,34 @@ export async function runAllScrapers(): Promise<{ added: number; total: number; 
   }
 }
 
-// Auto-run once when module loads (server startup)
-let startupDone = false;
+// Disk-based startup lock — persists across process restarts so server restarts
+// don't re-burn Apify budget. Resets after COOLDOWN_MS (3 hours).
+const STARTUP_LOCK_FILE = path.join(process.cwd(), '.scraper-startup.json');
+
+function lastStartupMs(): number {
+  try {
+    const raw = fs.readFileSync(STARTUP_LOCK_FILE, 'utf8');
+    return (JSON.parse(raw) as { ts: number }).ts ?? 0;
+  } catch { return 0; }
+}
+
+function markStartupRan(): void {
+  try { fs.writeFileSync(STARTUP_LOCK_FILE, JSON.stringify({ ts: Date.now() }), 'utf8'); } catch {}
+}
+
+// Auto-run once per 3-hour window — survives HMR reloads AND process restarts
+const _g = global as typeof globalThis & { _mmStartupDone?: boolean };
 export function runOnStartup() {
-  if (startupDone) return;
-  startupDone = true;
+  if (_g._mmStartupDone) return;
+  _g._mmStartupDone = true;
+
+  const elapsed = Date.now() - lastStartupMs();
+  if (elapsed < COOLDOWN_MS) {
+    console.log(`[Scraper] Startup skipped — last run ${Math.round(elapsed / 60000)}m ago (cooldown: ${Math.round(COOLDOWN_MS / 60000)}m)`);
+    return;
+  }
+
+  markStartupRan();
   runAllScrapers()
     .then(r => console.log(`[Scraper] Startup: fetched ${r.added} moments from live APIs`))
     .catch(e => console.error('[Scraper] Startup failed:', e));
