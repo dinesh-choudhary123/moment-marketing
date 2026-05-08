@@ -14,8 +14,9 @@ const THUMBNAIL_SENTINELS = new Set(['self', 'default', 'nsfw', 'image', 'spoile
 
 interface RedditPost {
   title?: string;
-  selftext?: string;   // post body — available for text posts
+  selftext?: string;
   subreddit?: string;
+  author?: string;
   ups?: number;
   score?: number;
   num_comments?: number;
@@ -133,6 +134,7 @@ export async function fetchRedditTrends(): Promise<Moment[]> {
         ? `${body.slice(0, 120)}${body.length > 120 ? '…' : ''}`
         : `r/${d.subreddit ?? 'all'} • ${ups.toLocaleString()} upvotes • ${comments.toLocaleString()} comments`;
 
+      const subreddit = d.subreddit ?? 'all';
       const moment = classifyTrend({
         name: (d.title ?? '').slice(0, 100),
         description,
@@ -140,6 +142,10 @@ export async function fetchRedditTrends(): Promise<Moment[]> {
         trendingScore: score,
         platform: 'Reddit',
         originDate: d.created_utc ? new Date(d.created_utc * 1000).toISOString() : undefined,
+        sourceAccounts: [
+          { name: `r/${subreddit}`, url: `https://www.reddit.com/r/${subreddit}/` },
+          ...(d.author && d.author !== '[deleted]' ? [{ name: `u/${d.author}`, url: `https://www.reddit.com/u/${d.author}/` }] : []),
+        ],
       });
       if (moment) moments.push(moment);
     }

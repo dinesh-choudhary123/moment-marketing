@@ -15,6 +15,22 @@ interface Props {
 
 const POST_TYPES = ['Post', 'Reel', 'Story', 'Video', 'Tweet', 'Short'];
 
+function toAbsoluteUrl(url: string): string {
+  if (!url) return url;
+  if (/^https?:\/\//i.test(url)) return url;
+  return `https://${url}`;
+}
+
+function openLink(url: string) {
+  const a = document.createElement('a');
+  a.href = toAbsoluteUrl(url);
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
 const emptyForm = { type: 'Post', brandName: '', url: '', likes: 0, comments: 0, shares: 0, views: 0 };
 
 export function BenchmarkingModal({ entry, onClose }: Props) {
@@ -131,10 +147,10 @@ export function BenchmarkingModal({ entry, onClose }: Props) {
                           className="w-full border border-[var(--card-border)] rounded-lg pl-7 pr-2 py-1.5 text-xs bg-[var(--background)] text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40" />
                       </div>
                       {editForm.url && (
-                        <a href={editForm.url} target="_blank" rel="noopener noreferrer"
+                        <button type="button" onClick={() => openLink(editForm.url!)}
                           className="p-1.5 rounded-lg border border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors flex items-center">
                           <ExternalLink className="w-3.5 h-3.5" />
-                        </a>
+                        </button>
                       )}
                       <button onClick={handleEditAutoFetch} disabled={fetchingEditUrl}
                         className="px-2 py-1 rounded-lg bg-[var(--accent)] text-white text-xs font-medium disabled:opacity-50">
@@ -170,10 +186,10 @@ export function BenchmarkingModal({ entry, onClose }: Props) {
                         <span className="text-xs font-medium text-[var(--foreground)]">{b.brandName}</span>
                         <span className="text-xs bg-[var(--accent-light)] text-[var(--accent)] px-1.5 py-0.5 rounded-full">{b.type}</span>
                         {b.url && (
-                          <a href={b.url} target="_blank" rel="noopener noreferrer"
+                          <button type="button" onClick={() => openLink(b.url)}
                             className="inline-flex items-center gap-0.5 text-[10px] text-[var(--accent)] hover:underline">
                             <ExternalLink className="w-2.5 h-2.5" /> Open
-                          </a>
+                          </button>
                         )}
                       </div>
                       <div className="flex gap-3 text-xs text-[var(--muted)] mt-1">
@@ -229,10 +245,10 @@ export function BenchmarkingModal({ entry, onClose }: Props) {
                   className="w-full border border-[var(--card-border)] rounded-xl pl-8 pr-3 py-2 text-sm bg-[var(--background)] text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40" />
               </div>
               {form.url && (
-                <a href={form.url} target="_blank" rel="noopener noreferrer"
+                <button type="button" onClick={() => openLink(form.url)}
                   className="flex items-center px-3 py-2 rounded-xl border border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors">
                   <ExternalLink className="w-4 h-4" />
-                </a>
+                </button>
               )}
               <Button variant="secondary" size="sm" loading={fetchingUrl} onClick={handleAutoFetch}>
                 Auto-Fetch

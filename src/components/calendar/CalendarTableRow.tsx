@@ -2,6 +2,16 @@
 
 import { useState } from 'react';
 import { ExternalLink } from 'lucide-react';
+
+function openLink(url: string) {
+  const a = document.createElement('a');
+  a.href = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
 import { trpc } from '@/lib/trpc';
 import { TypeBadge } from '@/components/ui/Badge';
 import { ActionMenu } from './ActionMenu';
@@ -121,6 +131,7 @@ export function CalendarTableRow({ entry, currency, onBenchmark, onView, onMakeP
         {entry.benchmarks.length > 0 ? (() => {
           const totalViews = entry.benchmarks.reduce((s, b) => s + (b.views ?? 0), 0);
           const top = entry.benchmarks.reduce((a, b) => (b.views ?? 0) > (a.views ?? 0) ? b : a);
+          const topUrl = top.url ?? '';   // capture as string so closure gets the right value
           return (
             <div className="flex flex-col gap-0.5">
               <button
@@ -131,17 +142,15 @@ export function CalendarTableRow({ entry, currency, onBenchmark, onView, onMakeP
               </button>
               <div className="flex items-center gap-1 text-[10px] text-[var(--muted)]">
                 <span>Top: {formatCompact(top.views ?? 0)}</span>
-                {top.url && (
-                  <a
-                    href={top.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={e => e.stopPropagation()}
-                    title={`Open top post: ${top.brandName}`}
+                {topUrl && (
+                  <button
+                    type="button"
+                    onClick={() => openLink(topUrl)}
+                    title={`Visit: ${topUrl}`}
                     className="text-[var(--accent)] hover:opacity-70"
                   >
                     <ExternalLink className="w-3 h-3" />
-                  </a>
+                  </button>
                 )}
               </div>
             </div>

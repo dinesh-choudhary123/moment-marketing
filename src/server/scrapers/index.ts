@@ -9,6 +9,7 @@ import { fetchRedditTrends } from './reddit';
 import { fetchInstagramTrends } from './instagram';
 import { fetchFacebookTrends } from './facebook';
 import { fetchGoogleTrends } from './google';
+import { fetchYouTubeTrends } from './youtube';
 
 // 3-hour cooldown — 4 full Apify runs/day = $1.88 max spend (within $2 cap)
 const COOLDOWN_MS = 3 * 60 * 60 * 1000;
@@ -27,19 +28,19 @@ export async function runAllScrapers(): Promise<{ added: number; total: number; 
   resetImageDedup();
 
   try {
-    // YouTube is intentionally excluded from startup — its Data API quota (10k units/day)
-    // is consumed on every cold start. YouTube is fetched on-demand via the YouTube button.
-    // All other scrapers here are free/unlimited and safe to run automatically.
+    // YouTube uses the web-client API (quota-free) first, so it's safe to run automatically.
+    // API keys are only used when the web client returns 0 results.
     const results = await Promise.allSettled([
       fetchTwitterTrends(),
       fetchRedditTrends(),
       fetchInstagramTrends(),
       fetchFacebookTrends(),
       fetchGoogleTrends(),
+      fetchYouTubeTrends(),
     ]);
 
     const platformResults: Map<Platform, Moment[]> = new Map();
-    const scraperPlatforms: Platform[] = ['Twitter', 'Reddit', 'Instagram', 'Facebook', 'Google'];
+    const scraperPlatforms: Platform[] = ['Twitter', 'Reddit', 'Instagram', 'Facebook', 'Google', 'YouTube'];
 
     for (let i = 0; i < results.length; i++) {
       const result = results[i];

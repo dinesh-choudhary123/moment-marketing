@@ -20,6 +20,11 @@ export type Ownership = 'Say Hi!' | 'Small Talk' | 'Conversation';
 
 export type Currency = 'INR' | 'USD' | 'EUR' | 'GBP' | 'JPY';
 
+export interface ReferenceUrl {
+  url: string;
+  label: string; // e.g. "Reel", "Post", "Profile", "Image", "Video", "Other"
+}
+
 export interface Moment {
   id: string;
   name: string;
@@ -29,6 +34,8 @@ export interface Moment {
   priority: MomentPriority;
   platforms: Platform[];
   imageUrl?: string;
+  referenceUrls?: ReferenceUrl[];
+  sourceAccounts?: Array<{ name: string; url: string }>;
   trendingScore: number;
   date?: string;
   isCustom: boolean;

@@ -168,7 +168,8 @@ Output only the 2-3 sentence explanation, no preamble.`;
       priority: PrioritySchema,
       platforms: z.array(PlatformSchema).min(1),
       date: z.string().optional(),
-      imageUrl: z.string().url().optional().or(z.literal('')),
+      imageUrl: z.string().optional().or(z.literal('')),
+      referenceUrls: z.array(z.object({ url: z.string(), label: z.string() })).optional(),
       tags: z.array(z.string()).optional(),
     }))
     .mutation(({ input }) => {
@@ -182,6 +183,7 @@ Output only the 2-3 sentence explanation, no preamble.`;
         platforms: input.platforms,
         date: input.date,
         imageUrl: input.imageUrl || undefined,
+        referenceUrls: input.referenceUrls?.filter(r => r.url.trim()) ?? [],
         trendingScore: input.priority === 'High' ? 80 : input.priority === 'Medium' ? 55 : 30,
         isCustom: true,
         createdAt: new Date().toISOString(),
