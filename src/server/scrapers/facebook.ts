@@ -1,439 +1,333 @@
 import type { Moment } from '@/types';
 import { classifyTrend } from './classifier';
-import { reserveCall, commitActual, releaseReservation } from '@/server/db/apify-spend';
 import { fetchTopicImage } from './image-utils';
 
 // ─── Facebook scraper ─────────────────────────────────────────────────────────
-// Primary:  Apify apify/facebook-pages-scraper — scrapes recent posts from top Indian pages
-// Fallback: 15 Indian news RSS feeds (free, updates every 15–30 min)
+// Primary  : ScrapeGraphAI extract() — scrapes Facebook hashtag pages AND public
+//            brand/marketing pages using AI-powered extraction.
+// Fallback : RSS from established marketing publications (afaqs!, Adweek, etc.)
+// Last     : Seed hashtag cards.
 
-const APIFY_BASE = 'https://api.apify.com/v2';
-const FRESHNESS_WINDOW_MS = 48 * 60 * 60 * 1000;
-const RSS_FRESHNESS_WINDOW_MS = 72 * 60 * 60 * 1000;
-
-// Indian news/entertainment + marketing & advertising pages
-const TRENDING_PAGES = [
-  // Indian news & entertainment
-  'https://www.facebook.com/IPL',
-  'https://www.facebook.com/ESPNcricinfo',
-  'https://www.facebook.com/bollywoodhungama',
-  'https://www.facebook.com/pinkvilla',
-  'https://www.facebook.com/TimesofIndia',
-  'https://www.facebook.com/india.today',
-  'https://www.facebook.com/economictimes',
-  'https://www.facebook.com/gadgets360',
-  // Marketing & advertising pages
-  'https://www.facebook.com/adweek',
-  'https://www.facebook.com/adsoftheworld',
-  'https://www.facebook.com/campaignasia',
-  'https://www.facebook.com/afaqs',
-  'https://www.facebook.com/exchangeformedia',
+const HASHTAGS = [
+  'momentmarketing', 'moment', 'marketingmentor', 'kitkat',
+  'advertising', 'outdooradvertising', 'marketing', 'creativeads',
 ];
 
-// ─── RSS sources (fallback) ───────────────────────────────────────────────────
+// All 8 hashtag search URLs
+const HASHTAG_URLS = HASHTAGS.map(tag => ({
+  tag,
+  url: `https://www.facebook.com/hashtag/${tag}`,
+  type: 'hashtag' as const,
+}));
 
-const RSS_SOURCES = [
-  { url: 'https://feeds.feedburner.com/ndtvnews-top-stories', source: 'NDTV', tier: 1 },
-  { url: 'https://timesofindia.indiatimes.com/rssfeedstopstories.cms', source: 'Times of India', tier: 1 },
-  { url: 'https://www.hindustantimes.com/feeds/rss/topnews/rssfeed.xml', source: 'Hindustan Times', tier: 1 },
-  { url: 'https://www.indiatoday.in/rss/home', source: 'India Today', tier: 1 },
-  { url: 'https://www.thehindu.com/news/national/feeder/default.rss', source: 'The Hindu', tier: 2 },
-  { url: 'https://indianexpress.com/feed/', source: 'Indian Express', tier: 2 },
-  { url: 'https://zeenews.india.com/rss/india-national-news.xml', source: 'Zee News', tier: 2 },
-  { url: 'https://www.firstpost.com/rss', source: 'Firstpost', tier: 2 },
-  { url: 'https://www.pinkvilla.com/rss.xml', source: 'Pinkvilla', tier: 2 },
-  { url: 'https://www.bollywoodhungama.com/rss/news.xml', source: 'Bollywood Hungama', tier: 2 },
-  { url: 'https://rss.espncricinfo.com/rss/content/story/feeds/0.xml', source: 'ESPNcricinfo', tier: 2 },
-  { url: 'https://feeds.feedburner.com/gadgets360-latest', source: 'Gadgets360', tier: 2 },
-  { url: 'https://www.business-standard.com/rss/home_page_top_stories.rss', source: 'Business Standard', tier: 2 },
-  { url: 'https://economictimes.indiatimes.com/rssfeedstopstories.cms', source: 'Economic Times', tier: 1 },
-  { url: 'https://www.livemint.com/rss/news', source: 'Livemint', tier: 2 },
+// Public brand/marketing pages — no login needed for basic post view
+const BRAND_PAGE_URLS = [
+  { tag: 'amul',        url: 'https://www.facebook.com/amul.india',                type: 'page' as const },
+  { tag: 'zomato',      url: 'https://www.facebook.com/ZomatoIN',                  type: 'page' as const },
+  { tag: 'adweek',      url: 'https://www.facebook.com/adweek',                    type: 'page' as const },
+  { tag: 'afaqs',       url: 'https://www.facebook.com/afaqs',                     type: 'page' as const },
+  { tag: 'fevicol',     url: 'https://www.facebook.com/Fevicol',                   type: 'page' as const },
+  { tag: 'creativegaga',url: 'https://www.facebook.com/creativegaga',              type: 'page' as const },
 ];
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Plain JSON Schema for extraction ────────────────────────────────────────
 
-interface ApifyFacebookPost {
-  postId?: string;
-  feedbackId?: string;
-  text?: string;
-  message?: string;
-  time?: string;
-  timestamp?: string;
-  pageName?: string;
-  pageId?: string;
-  images?: string[];
-  thumbnails?: string[];
-  media?: Array<{ thumbnail?: string; photo_image?: { uri?: string } }>;
-  likesCount?: number;
-  reactionsCount?: number;
-  reactions?: Record<string, number> | number;
-  commentsCount?: number;
-  sharesCount?: number;
-}
-
-// Some actors return page objects that contain a `posts` array
-interface ApifyFacebookPageResult {
-  title?: string;
-  name?: string;
-  posts?: ApifyFacebookPost[];
-  // Also handle flat post format (actor may return posts directly)
-  postId?: string;
-  text?: string;
-  time?: string;
-  likesCount?: number;
-}
-
-interface RSSItem {
-  title: string;
-  description: string;
-  imageUrl?: string;
-  source: string;
-  tier: number;
-  pubDate?: string;
-  pubTimestamp?: number;
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function isFresh(iso: string | number | undefined, windowMs = FRESHNESS_WINDOW_MS): boolean {
-  if (!iso) return false;
-  const t = typeof iso === 'number' ? iso * 1000 : new Date(iso).getTime();
-  if (isNaN(t)) return false;
-  return Date.now() - t <= windowMs;
-}
-
-function countReactions(post: ApifyFacebookPost): number {
-  if (typeof post.reactionsCount === 'number') return post.reactionsCount;
-  if (typeof post.likesCount === 'number') return post.likesCount;
-  if (typeof post.reactions === 'number') return post.reactions;
-  if (post.reactions && typeof post.reactions === 'object') {
-    return Object.values(post.reactions).reduce((sum, v) => sum + (v ?? 0), 0);
-  }
-  return 0;
-}
-
-function extractFacebookImage(post: ApifyFacebookPost): string | undefined {
-  if (post.images?.[0]) return post.images[0];
-  if (post.thumbnails?.[0]) return post.thumbnails[0];
-  if (post.media?.[0]) {
-    const m = post.media[0];
-    return m.photo_image?.uri ?? m.thumbnail;
-  }
-  return undefined;
-}
-
-// ─── Apify facebook-pages-scraper ─────────────────────────────────────────────
-
-async function fetchViaApify(token: string): Promise<Moment[]> {
-  const reservation = await reserveCall('apify/facebook-pages-scraper', 30, 10);
-  if (!reservation) {
-    console.warn('[Facebook] Apify budget exhausted — using RSS fallback');
-    return [];
-  }
-
-  console.log(`[Facebook] Apify facebook-pages-scraper (${TRENDING_PAGES.length} pages, limit=${reservation.safeLimit})...`);
-
-  let rawResults: ApifyFacebookPageResult[] = [];
-  try {
-    const res = await fetch(
-      `${APIFY_BASE}/acts/apify~facebook-pages-scraper/run-sync-get-dataset-items?timeout=300&format=json`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
+const FB_POSTS_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    posts: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          text:          { type: 'string',  description: 'Post caption or text content' },
+          authorName:    { type: 'string',  description: 'Name of the page or profile that posted' },
+          authorUrl:     { type: 'string',  description: 'Profile URL of the author' },
+          postUrl:       { type: 'string',  description: 'Direct link to this post' },
+          imageUrl:      { type: 'string',  description: 'Main image URL from the post' },
+          likesCount:    { type: 'number',  description: 'Number of likes or reactions' },
+          commentsCount: { type: 'number',  description: 'Number of comments' },
+          date:          { type: 'string',  description: 'Post date or time ago string' },
         },
-        body: JSON.stringify({
-          startUrls: TRENDING_PAGES.map(url => ({ url })),
-          maxPosts: reservation.safeLimit,
-          maxPostComments: 0,
-          maxReviews: 0,
-          scrapeAbout: false,
-          scrapeReviews: false,
-        }),
-        signal: AbortSignal.timeout(310_000),
+        required: ['text', 'authorName'],
       },
-    );
+      description: 'List of Facebook posts visible on this page',
+    },
+  },
+  required: ['posts'],
+};
 
-    if (!res.ok) {
-      console.error(`[Facebook] Apify error ${res.status}:`, (await res.text()).slice(0, 300));
-      await releaseReservation(reservation);
+interface FbPost {
+  text: string;
+  authorName: string;
+  authorUrl?: string;
+  postUrl?: string;
+  imageUrl?: string;
+  likesCount?: number;
+  commentsCount?: number;
+  date?: string;
+}
+
+// ─── ScrapeGraphAI helper ─────────────────────────────────────────────────────
+
+async function scrapeOnePage(
+  apiKey: string,
+  tag: string,
+  url: string,
+  type: 'hashtag' | 'page',
+): Promise<FbPost[]> {
+  try {
+    const { extract } = await import('scrapegraph-js');
+
+    const prompt = type === 'hashtag'
+      ? `This is a Facebook hashtag page for #${tag}. Extract all visible posts. ` +
+        `For each post get: the full post text or caption, the author page/profile name, ` +
+        `author profile URL, direct post URL, the main image URL, ` +
+        `number of likes or reactions, number of comments, and the date posted. ` +
+        `Return up to 12 posts. If the page asks you to log in, extract whatever is visible before the login wall.`
+      : `This is a public Facebook page for a brand or publication. Extract their recent posts. ` +
+        `For each post get: the full post text or caption, the page name (author), ` +
+        `the page URL as author URL, direct post URL, the main image URL, ` +
+        `number of likes or reactions, number of comments, and the date posted. ` +
+        `Return up to 8 posts. Focus on marketing, advertising, and brand-related content.`;
+
+    console.log(`[Facebook] SGAI extracting ${type} #${tag}: ${url}`);
+    const response = await extract(apiKey, {
+      url,
+      prompt,
+      schema: FB_POSTS_JSON_SCHEMA,
+      mode: 'normal',
+    });
+
+    if (response.status !== 'success' || !response.data?.json) {
+      console.warn(`[Facebook] SGAI ${type} #${tag} failed:`, response.error ?? 'no data');
       return [];
     }
 
-    rawResults = (await res.json()) as ApifyFacebookPageResult[];
+    const raw = response.data.json as { posts?: unknown[] };
+    const posts: FbPost[] = (raw?.posts ?? []) as FbPost[];
+
+    console.log(`[Facebook] SGAI ${type} #${tag} → ${posts.length} posts`);
+    return posts.filter(p => p.text && p.text.length > 5);
   } catch (e) {
-    console.error('[Facebook] Apify fetch failed:', e);
-    await releaseReservation(reservation);
+    console.error(`[Facebook] SGAI error for ${tag}:`, e);
     return [];
   }
+}
 
-  // Normalise: some actors return page-level objects with nested `posts`,
-  // others return flat post arrays directly.
-  const posts: ApifyFacebookPost[] = [];
-  for (const item of rawResults) {
-    if (Array.isArray(item.posts)) {
-      posts.push(...item.posts);
-    } else if (item.postId ?? item.text) {
-      posts.push(item as unknown as ApifyFacebookPost);
+// ─── Primary: ScrapeGraphAI ───────────────────────────────────────────────────
+
+async function fetchViaScrapeGraphAI(apiKey: string): Promise<Moment[]> {
+  // First try all 8 hashtag URLs
+  const allTargets = [...HASHTAG_URLS, ...BRAND_PAGE_URLS];
+  const allPosts: Array<FbPost & { tag: string }> = [];
+
+  // Process hashtag pages first (run in batches of 3 to avoid rate limits)
+  const hashtagBatchSize = 3;
+  for (let i = 0; i < HASHTAG_URLS.length; i += hashtagBatchSize) {
+    const batch = HASHTAG_URLS.slice(i, i + hashtagBatchSize);
+    const batchResults = await Promise.all(
+      batch.map(({ tag, url, type }) => scrapeOnePage(apiKey, tag, url, type)),
+    );
+    for (let j = 0; j < batch.length; j++) {
+      for (const p of batchResults[j]) allPosts.push({ ...p, tag: batch[j].tag });
+    }
+    if (allPosts.length >= 30) break;
+  }
+
+  // If hashtag pages gave < 5 posts, also try public brand pages
+  if (allPosts.length < 5) {
+    console.log('[Facebook] Hashtag pages returned few posts — also scraping brand pages...');
+    const brandBatchSize = 3;
+    for (let i = 0; i < BRAND_PAGE_URLS.length; i += brandBatchSize) {
+      const batch = BRAND_PAGE_URLS.slice(i, i + brandBatchSize);
+      const batchResults = await Promise.all(
+        batch.map(({ tag, url, type }) => scrapeOnePage(apiKey, tag, url, type)),
+      );
+      for (let j = 0; j < batch.length; j++) {
+        for (const p of batchResults[j]) allPosts.push({ ...p, tag: batch[j].tag });
+      }
+      if (allPosts.length >= 30) break;
     }
   }
 
-  await commitActual(reservation, posts.length);
+  console.log(`[Facebook] SGAI total: ${allPosts.length} posts from ${allTargets.length} sources`);
+  if (allPosts.length === 0) return [];
 
-  if (posts.length === 0) {
-    console.warn('[Facebook] Apify returned 0 posts');
-    return [];
-  }
-
-  // Filter: fresh + has text
+  // Dedupe by text
   const seen = new Set<string>();
-  const fresh = posts.filter(p => {
-    const text = p.text ?? p.message;
-    if (!text) return false;
-    if (!isFresh(p.time ?? p.timestamp)) return false;
-    const key = p.postId ?? p.feedbackId ?? text.slice(0, 50);
+  const unique = allPosts.filter(p => {
+    const key = p.text.slice(0, 80).toLowerCase();
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 
-  console.log(`[Facebook] Apify → ${fresh.length} fresh posts from ${posts.length} scraped`);
-
-  // Resolve images in parallel: post image → fetchTopicImage(postTitle)
+  // Resolve images
   const imageUrls = await Promise.all(
-    fresh.map(post => {
-      const direct = extractFacebookImage(post);
-      const title = (post.text ?? post.message ?? '').slice(0, 60);
-      return direct ? Promise.resolve(direct) : fetchTopicImage(title);
+    unique.map(p => {
+      if (p.imageUrl?.startsWith('http')) return Promise.resolve(p.imageUrl);
+      return fetchTopicImage(`${p.tag} marketing advertising`);
     }),
   );
 
-  return fresh
-    .map((post, idx) => {
-      const reactions = countReactions(post);
-      const comments = post.commentsCount ?? 0;
-      const shares = post.sharesCount ?? 0;
-      const engagement = reactions + comments * 3 + shares * 5;
-      const score = Math.min(100, 55 + Math.floor(Math.log10(engagement + 1) * 8));
-      const text = ((post.text ?? post.message) ?? '').replace(/\n+/g, ' ').trim();
-      const pageName = post.pageName ?? 'Facebook';
+  const mapped = unique.map((p, idx) => {
+    const pageName = p.authorName || 'Facebook Page';
+    const pageUrl  = p.authorUrl  || `https://www.facebook.com/${p.tag}`;
 
-      // Use the post body as description — the actual content tells more than metric labels
-      const body = text.slice(0, 150);
-      const description = body.length > 10
-        ? `${body}${text.length > 150 ? '…' : ''}`
-        : `${pageName} • ${reactions.toLocaleString()} reactions`;
+    const engagement = (p.likesCount ?? 0) + (p.commentsCount ?? 0) * 3;
+    const score = Math.min(100, 65 + Math.floor(Math.log10(Math.max(engagement, 1) + 1) * 8));
 
-      return classifyTrend({
-        name: text.slice(0, 100) || 'Facebook Trending Post',
-        description,
-        imageUrl: imageUrls[idx],
-        trendingScore: score,
-        platform: 'Facebook',
-        originDate: post.time ?? post.timestamp,
-      });
-    })
-    .filter((m): m is NonNullable<typeof m> => m !== null);
-}
+    const name        = p.text.slice(0, 100) || `${pageName} on Facebook`;
+    const description = p.text.slice(0, 150) + (p.text.length > 150 ? '…' : '');
 
-// ─── RSS fallback ─────────────────────────────────────────────────────────────
+    console.log(`[Facebook] post: #${p.tag} author="${pageName}" text="${name.slice(0, 50)}"`);
 
-function extractRSSTag(xml: string, tag: string): string {
-  const patterns = [
-    new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>`, 'i'),
-    new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'),
-  ];
-  for (const pat of patterns) {
-    const m = xml.match(pat);
-    if (m?.[1]) return m[1].trim().replace(/<[^>]+>/g, '').trim();
-  }
-  return '';
-}
-
-function extractRSSImageUrl(itemBlock: string): string | undefined {
-  const patterns = [
-    /media:content[^>]*url="([^"]+)"/i,
-    /media:thumbnail[^>]*url="([^"]+)"/i,
-    /<enclosure[^>]*url="([^"]+)"[^>]*type="image/i,
-    /url="(https?:\/\/[^"]+\.(?:jpg|jpeg|png|webp)(?:\?[^"]*)?)"/i,
-    /<img[^>]*src="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i,
-    /https?:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)(?:\?[^\s"'<>]*)?/i,
-  ];
-  for (const pat of patterns) {
-    const m = itemBlock.match(pat);
-    const url = m?.[1] ?? m?.[0];
-    if (url && url.startsWith('http') && !url.includes('logo') && !url.includes('icon')) {
-      return url;
-    }
-  }
-  return undefined;
-}
-
-async function fetchRSSSource(
-  rssUrl: string,
-  sourceName: string,
-  tier: number,
-): Promise<RSSItem[]> {
-  try {
-    const res = await fetch(rssUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; MomentMarketing/2.0)',
-        Accept: 'application/rss+xml, application/xml, text/xml, */*',
-      },
-      signal: AbortSignal.timeout(8_000),
+    return classifyTrend({
+      name,
+      description,
+      imageUrl: imageUrls[idx],
+      trendingScore: score,
+      platform: 'Facebook',
+      originDate: p.date ? new Date(p.date).toISOString() : undefined,
+      sourceAccounts: [{ name: pageName, url: pageUrl }],
     });
-    if (!res.ok) return [];
+  });
 
-    const xml = await res.text();
-    const itemBlocks = xml.match(/<item>([\s\S]*?)<\/item>/gi) ?? [];
-
-    return itemBlocks.slice(0, 20).map(block => {
-      const title = extractRSSTag(block, 'title');
-      const desc =
-        extractRSSTag(block, 'description') ||
-        extractRSSTag(block, 'summary') ||
-        extractRSSTag(block, 'content');
-      const pubDateStr =
-        extractRSSTag(block, 'pubDate') ||
-        extractRSSTag(block, 'dc:date') ||
-        extractRSSTag(block, 'published');
-      const imageUrl = extractRSSImageUrl(block);
-
-      let pubTimestamp: number | undefined;
-      if (pubDateStr) {
-        const t = new Date(pubDateStr).getTime();
-        if (!isNaN(t)) pubTimestamp = t;
-      }
-
-      return {
-        title: title
-          .replace(/&amp;/g, '&')
-          .replace(/&#39;/g, "'")
-          .replace(/&quot;/g, '"') || `${sourceName} Update`,
-        description: desc.slice(0, 400).replace(/&amp;/g, '&').replace(/&#39;/g, "'"),
-        imageUrl,
-        source: sourceName,
-        tier,
-        pubDate: pubDateStr || undefined,
-        pubTimestamp,
-      };
-    }).filter(item => item.title.length > 5);
-  } catch {
-    return [];
-  }
+  const results = mapped.filter((m): m is NonNullable<typeof m> => m !== null);
+  console.log(`[Facebook] SGAI final: ${results.length} moments`);
+  return results;
 }
 
-function scoreRSSItem(item: RSSItem): number {
-  let score = 60;
-  if (item.tier === 1) score += 12;
-  const combined = (item.title + ' ' + item.description).toLowerCase();
-  if (/cricket|ipl|match|score|win/.test(combined)) score += 10;
-  if (/bollywood|film|movie|actor|actress/.test(combined)) score += 9;
-  if (/viral|trending|massive|shocking|breaking/.test(combined)) score += 6;
-  if (/budget|economy|sensex|market|rbi/.test(combined)) score += 7;
-  if (/election|politic|minister|modi|bjp|congress|aap|vote/.test(combined)) score -= 15;
-  if (/tech|ai|startup|isro|phone/.test(combined)) score += 5;
-  if (item.pubTimestamp) {
-    const ageHours = (Date.now() - item.pubTimestamp) / 3_600_000;
-    if (ageHours < 1) score += 20;
-    else if (ageHours < 3) score += 15;
-    else if (ageHours < 6) score += 10;
-    else if (ageHours < 12) score += 5;
-    else if (ageHours > 48) score -= 15;
-  }
-  return Math.min(97, Math.max(40, score));
+// ─── Fallback: RSS from marketing publications ────────────────────────────────
+
+interface RssSource { name: string; rssUrl: string; fbPage: string }
+const MARKETING_RSS_SOURCES: RssSource[] = [
+  { name: 'afaqs!',         rssUrl: 'https://www.afaqs.com/rss',               fbPage: 'https://www.facebook.com/afaqs' },
+  { name: 'Adweek',         rssUrl: 'https://www.adweek.com/feed/',            fbPage: 'https://www.facebook.com/adweek' },
+  { name: 'Marketing Week', rssUrl: 'https://www.marketingweek.com/feed/',     fbPage: 'https://www.facebook.com/marketingweekmagazine' },
+  { name: 'Campaign India', rssUrl: 'https://www.campaignindia.in/rss',        fbPage: 'https://www.facebook.com/campaignindia.in' },
+  { name: 'Creative Gaga',  rssUrl: 'https://creativegaga.com/feed/',          fbPage: 'https://www.facebook.com/creativegaga' },
+  { name: 'Campaign Asia',  rssUrl: 'https://www.campaignasia.com/feed/',      fbPage: 'https://www.facebook.com/campaignasia' },
+];
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&ndash;/g, '–').replace(/&mdash;/g, '—').replace(/&nbsp;/g, ' ');
+}
+
+function extractTag(xml: string, tag: string): string {
+  const c = xml.match(new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]></${tag}>`));
+  if (c) return c[1].trim();
+  const p = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`));
+  return p ? p[1].trim() : '';
 }
 
 async function fetchViaRSS(): Promise<Moment[]> {
-  console.log('[Facebook] Using RSS fallback (15 Indian news sources)...');
+  console.log('[Facebook] RSS fallback...');
+  const allItems: Array<{ title: string; link: string; description: string; pubDate: string; imageUrl?: string; sourceName: string; fbPage: string }> = [];
 
-  const results = await Promise.allSettled(
-    RSS_SOURCES.map(s =>
-      fetchRSSSource(s.url, s.source, s.tier).then(items => ({ items, source: s.source })),
-    ),
+  await Promise.allSettled(
+    MARKETING_RSS_SOURCES.map(async src => {
+      try {
+        const res = await fetch(src.rssUrl, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MomentBot/1.0)' },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) return;
+        const xml = await res.text();
+        const re = /<item>([\s\S]*?)<\/item>/g;
+        let m; let count = 0;
+        while ((m = re.exec(xml)) !== null && count < 5) {
+          const raw = m[1];
+          const title = decodeEntities(extractTag(raw, 'title').replace(/<[^>]+>/g, '').trim());
+          const link  = raw.match(/<link>([^<]+)<\/link>/)?.[1]?.trim() ?? '';
+          const desc  = decodeEntities(extractTag(raw, 'description').replace(/<[^>]+>/g, '').trim()).slice(0, 200);
+          const date  = extractTag(raw, 'pubDate') || '';
+          const img   = raw.match(/<enclosure[^>]+url="([^"]+)"/)?.[1]
+            ?? raw.match(/<media:content[^>]+url="([^"]+)"/)?.[1]
+            ?? raw.match(/<media:thumbnail[^>]+url="([^"]+)"/)?.[1]
+            ?? extractTag(raw, 'description').match(/<img[^>]+src="([^"]+)"/)?.[1];
+          if (title && link) {
+            allItems.push({ title, link, description: desc, pubDate: date, imageUrl: img?.startsWith('http') ? img : undefined, sourceName: src.name, fbPage: src.fbPage });
+            count++;
+          }
+        }
+        console.log(`[Facebook] RSS ${src.name} → ${count} items`);
+      } catch { /* skip */ }
+    }),
   );
 
-  const allItems: RSSItem[] = [];
-  let sourcesFetched = 0;
-  for (const r of results) {
-    if (r.status === 'fulfilled' && r.value.items.length > 0) {
-      allItems.push(...r.value.items);
-      sourcesFetched++;
-    }
-  }
+  if (allItems.length === 0) return [];
+  allItems.sort((a, b) => (new Date(b.pubDate).getTime() || 0) - (new Date(a.pubDate).getTime() || 0));
 
-  // Freshness gate + dedupe
-  const seen = new Set<string>();
-  const unique = allItems
-    .filter(item => {
-      if (!isFresh(item.pubTimestamp, RSS_FRESHNESS_WINDOW_MS)) return false;
-      const key = item.title
-        .toLowerCase()
-        .replace(/[^a-z0-9 ]/g, '')
-        .trim()
-        .slice(0, 60);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .sort((a, b) => {
-      const aDelta = a.pubTimestamp ? Date.now() - a.pubTimestamp : Infinity;
-      const bDelta = b.pubTimestamp ? Date.now() - b.pubTimestamp : Infinity;
-      return aDelta - bDelta;
-    });
-
-  console.log(`[Facebook] RSS → ${unique.length} stories from ${sourcesFetched}/${RSS_SOURCES.length} sources`);
-
-  // Resolve images: RSS image first, then fetchTopicImage
   const imageUrls = await Promise.all(
-    unique.slice(0, 60).map(item =>
-      item.imageUrl && item.imageUrl.startsWith('http')
-        ? Promise.resolve(item.imageUrl)
-        : fetchTopicImage(item.title),
-    ),
+    allItems.map(i => i.imageUrl ? Promise.resolve(i.imageUrl) : fetchTopicImage(`${i.title} marketing`)),
   );
 
-  return unique.slice(0, 60)
-    .map((item, idx) => {
-      const score = scoreRSSItem(item);
-      const freshnessLabel = item.pubTimestamp
-        ? (() => {
-            const ageMin = Math.round((Date.now() - item.pubTimestamp!) / 60_000);
-            if (ageMin < 60) return `${ageMin}m ago`;
-            const ageHr = Math.round(ageMin / 60);
-            return ageHr < 24 ? `${ageHr}h ago` : `${Math.round(ageHr / 24)}d ago`;
-          })()
-        : 'Today';
+  return allItems
+    .map((item, idx) => classifyTrend({
+      name: item.title.slice(0, 100),
+      description: item.description || item.title,
+      imageUrl: imageUrls[idx],
+      trendingScore: 72,
+      platform: 'Facebook',
+      originDate: item.pubDate || new Date().toISOString(),
+      sourceAccounts: [{ name: item.sourceName, url: item.fbPage }],
+    }))
+    .filter((m): m is NonNullable<typeof m> => m !== null);
+}
 
-      return classifyTrend({
-        name: item.title.slice(0, 100),
-        description: `${item.source} • ${freshnessLabel} • ${item.description.slice(0, 200) || item.title}`,
-        imageUrl: imageUrls[idx],
-        trendingScore: score,
-        platform: 'Facebook',
-        originDate:
-          item.pubDate ??
-          (item.pubTimestamp ? new Date(item.pubTimestamp).toISOString() : undefined),
-      });
-    })
+// ─── Seed fallback ────────────────────────────────────────────────────────────
+
+async function fetchViaSeedFallback(): Promise<Moment[]> {
+  const now = new Date().toISOString();
+  const images = await Promise.all(HASHTAGS.map(h => fetchTopicImage(`${h} marketing advertising`)));
+  return HASHTAGS
+    .map((tag, i) => classifyTrend({
+      name: `#${tag}`,
+      description: `Trending marketing content under #${tag} on Facebook.`,
+      imageUrl: images[i],
+      trendingScore: 65,
+      platform: 'Facebook',
+      originDate: now,
+      sourceAccounts: [{ name: `#${tag}`, url: `https://www.facebook.com/hashtag/${tag}` }],
+    }))
     .filter((m): m is NonNullable<typeof m> => m !== null);
 }
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 export async function fetchFacebookTrends(): Promise<Moment[]> {
-  const token = process.env.APIFY_TOKEN;
+  const sgaiKey = process.env.SGAI_API_KEY;
 
-  if (token) {
+  // Primary: ScrapeGraphAI — scrapes all 8 hashtag pages + brand pages
+  if (sgaiKey && sgaiKey.trim().length > 0) {
     try {
-      const apifyResults = await fetchViaApify(token);
-      if (apifyResults.length > 0) return apifyResults;
-      console.warn('[Facebook] Apify returned 0 — falling back to RSS');
+      const results = await fetchViaScrapeGraphAI(sgaiKey.trim());
+      if (results.length > 0) {
+        console.log(`[Facebook] Using ${results.length} SGAI posts`);
+        return results;
+      }
+      console.warn('[Facebook] SGAI returned 0 — falling back to RSS');
     } catch (e) {
-      console.error('[Facebook] Apify error:', e);
+      console.error('[Facebook] SGAI error:', e);
     }
+  } else {
+    console.log('[Facebook] No SGAI_API_KEY set — using RSS');
   }
 
-  return fetchViaRSS();
+  // Fallback: RSS from marketing publications
+  try {
+    const rss = await fetchViaRSS();
+    if (rss.length > 0) return rss;
+  } catch (e) {
+    console.error('[Facebook] RSS error:', e);
+  }
+
+  return fetchViaSeedFallback();
 }

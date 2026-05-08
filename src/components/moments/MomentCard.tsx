@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import Image from 'next/image';
-import { CalendarPlus, CalendarX, TrendingUp, Zap, Tag, Clock, X } from 'lucide-react';
+import { CalendarPlus, CalendarX, TrendingUp, Zap, Tag, Clock, X, ExternalLink } from 'lucide-react';
 import type { Moment } from '@/types';
 import { TypeBadge, CategoryBadge, PriorityDot } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -73,27 +73,30 @@ export function MomentCard({ moment, onAdded }: MomentCardProps) {
     onError: (e) => toast(e.message, 'error'),
   });
 
-  // Lazily generate a context blurb when the detail popup opens.
-  // Only trust cached context that came from the AI (starts with [ai] marker).
-  const cachedAiContext = moment.context?.startsWith('[ai]') ? moment.context.slice(4).trim() : '';
-  const [context, setContext] = useState<string>(cachedAiContext);
-  const generateContext = trpc.moments.generateContext.useMutation({
-    onSuccess: (data) => setContext(data.context),
-  });
-  useEffect(() => {
-    if (detailOpen && !context && !generateContext.isPending) {
-      generateContext.mutate({ momentId: moment.id });
-    }
-  }, [detailOpen, context, generateContext, moment.id]);
+  function openLink(url: string) {
+    const a = document.createElement('a');
+    a.href = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
 
-  const placeholderColors = [
-    'from-indigo-400 to-purple-500',
-    'from-pink-400 to-rose-500',
-    'from-amber-400 to-orange-500',
-    'from-cyan-400 to-blue-500',
-    'from-emerald-400 to-teal-500',
+  // Richer dark gradients — used when no real image is available.
+  // Pairs: [gradient classes, accent hex color for the left bar]
+  const placeholderPalettes: Array<[string, string]> = [
+    ['from-[#0f172a] to-[#1e3a5f]',  '#3b82f6'],  // deep navy / blue
+    ['from-[#1a0e2e] to-[#2d1a4a]',  '#a855f7'],  // deep indigo / purple
+    ['from-[#0c1a12] to-[#14332a]',  '#22c55e'],  // deep forest / green
+    ['from-[#1a0e0e] to-[#3b1515]',  '#ef4444'],  // deep charcoal / red
+    ['from-[#0a1628] to-[#0f2744]',  '#06b6d4'],  // midnight / cyan
+    ['from-[#1a1206] to-[#302010]',  '#f59e0b'],  // dark amber / gold
   ];
-  const colorClass = placeholderColors[moment.name.charCodeAt(0) % placeholderColors.length];
+  // Stable pick per trend name so the same trend always gets the same palette
+  let nameHash = 0;
+  for (let i = 0; i < moment.name.length; i++) nameHash = (nameHash * 31 + moment.name.charCodeAt(i)) | 0;
+  const [gradientClass, accentColor] = placeholderPalettes[Math.abs(nameHash) % placeholderPalettes.length];
   const insight = INSIGHTS[moment.category] ?? 'Track this moment early to get ahead of the trend curve. Authentic, timely content wins.';
 
   return (
@@ -113,8 +116,27 @@ export function MomentCard({ moment, onAdded }: MomentCardProps) {
               onClick={() => setImgZoomed(true)}
             />
           ) : (
-            <div className={cn('absolute inset-0 bg-gradient-to-br', colorClass, 'flex items-center justify-center')}>
-              <TrendingUp className="w-10 h-10 text-white/60" />
+            /* Styled text card — shown when no real image exists.
+               Looks intentional: dark gradient + trend name + platform label. */
+            <div className={cn('absolute inset-0 bg-gradient-to-br', gradientClass)}>
+              {/* Left accent bar */}
+              <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-none" style={{ backgroundColor: accentColor }} />
+              {/* Soft glow blobs for depth */}
+              <div className="absolute -top-6 -right-6 w-28 h-28 rounded-full blur-3xl opacity-20" style={{ backgroundColor: accentColor }} />
+              <div className="absolute -bottom-4 left-10 w-20 h-20 rounded-full blur-2xl opacity-10 bg-white" />
+              {/* Content */}
+              <div className="absolute inset-0 flex flex-col justify-center px-6 pr-5">
+                <p className="text-[10px] font-semibold uppercase tracking-widest mb-2.5" style={{ color: accentColor, opacity: 0.85 }}>
+                  {moment.platforms[0]} · Trending
+                </p>
+                <h3 className="text-white font-extrabold leading-tight line-clamp-3 text-base">
+                  {moment.name}
+                </h3>
+              </div>
+              {/* Watermark icon bottom-right */}
+              <div className="absolute bottom-3 right-3 opacity-10">
+                <TrendingUp className="w-8 h-8 text-white" />
+              </div>
             </div>
           )}
           {/* Overlays */}
@@ -286,30 +308,25 @@ export function MomentCard({ moment, onAdded }: MomentCardProps) {
                 </div>
               )}
 
-              {/* Why it's trending */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <p className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wide">Why It&apos;s Trending</p>
-                  <button
-                    onClick={() => { setContext(''); generateContext.mutate({ momentId: moment.id, force: true }); }}
-                    disabled={generateContext.isPending}
-                    className="text-[10px] text-[var(--accent)] hover:underline disabled:opacity-50"
-                  >
-                    {generateContext.isPending ? '…' : '↻ Regenerate'}
-                  </button>
-                </div>
-                {context ? (
-                  <p className="text-xs text-[var(--foreground)] leading-relaxed">{context}</p>
-                ) : generateContext.isPending ? (
-                  <div className="space-y-1.5">
-                    <div className="skeleton h-3 rounded w-full" />
-                    <div className="skeleton h-3 rounded w-11/12" />
-                    <div className="skeleton h-3 rounded w-4/5" />
+              {/* Posted By — source accounts */}
+              {moment.sourceAccounts && moment.sourceAccounts.length > 0 && (
+                <div>
+                  <p className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wide mb-2">Posted By</p>
+                  <div className="flex flex-wrap gap-2">
+                    {moment.sourceAccounts.map((acc, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => openLink(acc.url)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[var(--accent-light)] text-[var(--accent)] text-xs font-medium hover:bg-[var(--accent)] hover:text-white transition-colors"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        {acc.name}
+                      </button>
+                    ))}
                   </div>
-                ) : (
-                  <p className="text-xs text-[var(--muted)] italic">Generating context…</p>
-                )}
-              </div>
+                </div>
+              )}
 
               {/* Raw source stats */}
               <div>
@@ -325,6 +342,35 @@ export function MomentCard({ moment, onAdded }: MomentCardProps) {
                       <Tag className="w-2 h-2" />{tag}
                     </span>
                   ))}
+                </div>
+              )}
+
+              {/* Reference URLs */}
+              {moment.referenceUrls && moment.referenceUrls.length > 0 && (
+                <div>
+                  <p className="text-[11px] font-semibold text-[var(--muted)] uppercase tracking-wide mb-1.5">Reference Links</p>
+                  <div className="flex flex-col gap-1.5">
+                    {moment.referenceUrls.map((ref, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => {
+                          const a = document.createElement('a');
+                          a.href = /^https?:\/\//i.test(ref.url) ? ref.url : `https://${ref.url}`;
+                          a.target = '_blank';
+                          a.rel = 'noopener noreferrer';
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                        }}
+                        className="flex items-center gap-2 text-xs text-[var(--accent)] hover:text-[var(--accent)]/80 text-left group"
+                      >
+                        <span className="bg-[var(--accent-light)] text-[var(--accent)] text-[10px] font-medium px-1.5 py-0.5 rounded-full flex-shrink-0">{ref.label}</span>
+                        <span className="truncate underline underline-offset-2 group-hover:no-underline">{ref.url}</span>
+                        <ExternalLink className="w-3 h-3 flex-shrink-0 opacity-60" />
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
 

@@ -12,6 +12,14 @@ interface RawTrend {
   volume?: number;
   /** ISO timestamp of the original post / trend origin. If omitted, today is used. */
   originDate?: string;
+  /** Clickable accounts / sources this trend was scraped from. */
+  sourceAccounts?: Array<{ name: string; url: string }>;
+  /**
+   * When true, skip the Unsplash/category fallback image entirely.
+   * The card will render its designed gradient placeholder instead.
+   * Use this when no relevant real image exists (e.g. Twitter India trends).
+   */
+  skipFallbackImage?: boolean;
 }
 
 // ─── Brand safety — topics to EXCLUDE from marketing moments ────────────────
@@ -545,9 +553,14 @@ export function classifyTrend(raw: RawTrend): Moment | null {
   const providedImage = raw.imageUrl && (isLocalOrProxy || !blockedDomains.some(d => raw.imageUrl!.includes(d)))
     ? raw.imageUrl
     : undefined;
-  let imageUrl = providedImage ?? getSmartFallbackImage(raw.name, description, category);
-  // Only dedupe synthetic fallbacks — real images (cached posts, Wikipedia) are allowed to repeat.
-  if (!providedImage) {
+
+  // If skipFallbackImage is set and no real image was provided, leave imageUrl undefined.
+  // The MomentCard will render its styled gradient placeholder — intentional, not broken.
+  let imageUrl: string | undefined;
+  if (providedImage) {
+    imageUrl = providedImage;
+  } else if (!raw.skipFallbackImage) {
+    imageUrl = getSmartFallbackImage(raw.name, description, category);
     imageUrl = dedupeFallbackImage(raw.name, category, imageUrl);
     rememberImage(imageUrl);
   }
@@ -561,6 +574,7 @@ export function classifyTrend(raw: RawTrend): Moment | null {
     priority: classifyPriority(finalScore),
     platforms: [raw.platform],
     imageUrl,
+    sourceAccounts: raw.sourceAccounts ?? [],
     trendingScore: finalScore,
     date: normalizedOriginIso.slice(0, 10),
     isCustom: false,

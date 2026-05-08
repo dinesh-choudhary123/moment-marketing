@@ -10,18 +10,21 @@ import { join } from 'path';
 
 const LEDGER_PATH = join(process.cwd(), '.apify-spend.json');
 const LEDGER_TMP = LEDGER_PATH + '.tmp';
-export const DAILY_CAP_USD = 3.0;
+export const DAILY_CAP_USD = 6.0;
 
 // Published Apify per-result pricing (pay-per-event actors).
 export const COST_PER_ITEM: Record<ApifyActor, number> = {
-  'apify/instagram-scraper':          0.0023, // $2.30 / 1K items  (legacy)
-  'apify/facebook-posts-scraper':     0.0050, // $5.00 / 1K items  (legacy)
-  'apidojo/tweet-scraper':            0.0004, // $0.40 / 1K tweets (legacy)
-  'quacker/twitter-scraper':          0.0010, // $1.00 / 1K tweets
-  'apify/instagram-hashtag-scraper':  0.0040, // $4.00 / 1K posts
-  'apify/facebook-pages-scraper':     0.0050, // $5.00 / 1K posts
-  'emastra/google-trends-scraper':    0.0020, // $2.00 / 1K items
-  'apify/youtube-scraper':            0.0030, // $3.00 / 1K items
+  'apify/instagram-scraper':                    0.0023, // $2.30 / 1K items  (legacy)
+  'apify/facebook-posts-scraper':               0.0050, // $5.00 / 1K items  (legacy)
+  'apidojo/tweet-scraper':                      0.0004, // $0.40 / 1K tweets (legacy)
+  'quacker/twitter-scraper':                    0.0010, // $1.00 / 1K tweets
+  'apify/instagram-hashtag-scraper':            0.0040, // $4.00 / 1K posts
+  'apify/facebook-pages-scraper':               0.0050, // $5.00 / 1K posts
+  'emastra/google-trends-scraper':              0.0020, // $2.00 / 1K items
+  'apify/youtube-scraper':                      0.0030, // $3.00 / 1K items
+  'datapilot/facebook-hashtag-search-scraper':  0.0030, // $3.00 / 1K posts (requires paid rental)
+  'automation-lab/facebook-posts-scraper':      0.0030, // $3.00 / 1K posts (now requires rental)
+  'powerai/facebook-post-search-scraper':       0.0200, // $10/1K results + $0.09/start ≈ $20/1K effective
 };
 
 export type ApifyActor =
@@ -32,7 +35,10 @@ export type ApifyActor =
   | 'apify/instagram-hashtag-scraper'  // Instagram hashtag posts
   | 'apify/facebook-pages-scraper'     // Facebook page posts
   | 'emastra/google-trends-scraper'    // Google Trends realtime
-  | 'apify/youtube-scraper';           // YouTube quota fallback
+  | 'apify/youtube-scraper'            // YouTube quota fallback
+  | 'datapilot/facebook-hashtag-search-scraper'   // requires paid rental
+  | 'automation-lab/facebook-posts-scraper'       // now requires rental
+  | 'powerai/facebook-post-search-scraper';       // keyword search — returns author.name/url
 
 interface Ledger {
   date: string; // YYYY-MM-DD (UTC)

@@ -48,6 +48,26 @@ async function fetchBingNewsImage(keyword: string): Promise<string | undefined> 
       }
     }
 
+    // Try <media:thumbnail url="…">
+    const thumbMatch = xml.match(/<media:thumbnail[^>]+url="([^"]+)"/i);
+    if (thumbMatch?.[1]) {
+      const src = thumbMatch[1];
+      if (src.startsWith('http') && !usedImageUrls.has(src)) {
+        usedImageUrls.add(src);
+        return src;
+      }
+    }
+
+    // Try <media:content url="…">
+    const mediaMatch = xml.match(/<media:content[^>]+url="([^"]+)"/i);
+    if (mediaMatch?.[1]) {
+      const src = mediaMatch[1];
+      if (src.startsWith('http') && !usedImageUrls.has(src)) {
+        usedImageUrls.add(src);
+        return src;
+      }
+    }
+
     // Fallback: any image URL in the first <item> block
     const firstItem = xml.match(/<item>([\s\S]*?)<\/item>/i)?.[1] ?? '';
     const urlMatch = firstItem.match(

@@ -2,6 +2,71 @@ import type { Moment } from '@/types';
 import { classifyTrend } from './classifier';
 import { reserveCall, commitActual, releaseReservation } from '@/server/db/apify-spend';
 import { fetchTopicImage } from './image-utils';
+import { request as httpsRequest } from 'node:https';
+
+// ─── node:https helpers ───────────────────────────────────────────────────────
+// We use node:https instead of global fetch for Apify calls because undici
+// (the Node.js fetch implementation) has a hard 10-second TCP connect timeout
+// (UND_ERR_CONNECT_TIMEOUT) that fires before Apify's server can respond.
+// node:https uses native libuv sockets with configurable timeouts.
+
+function nodeHttpsPost(url: string, token: string, body: unknown): Promise<{ status: number; json: unknown }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const bodyStr = JSON.stringify(body);
+    const req = httpsRequest(
+      {
+        hostname: parsed.hostname,
+        path: parsed.pathname + parsed.search,
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(bodyStr),
+        },
+        timeout: 60_000,
+      },
+      res => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode ?? 0, json: JSON.parse(Buffer.concat(chunks).toString()) }); }
+          catch { resolve({ status: res.statusCode ?? 0, json: {} }); }
+        });
+      },
+    );
+    req.on('timeout', () => { req.destroy(); reject(new Error('Apify start timeout')); });
+    req.on('error', reject);
+    req.write(bodyStr);
+    req.end();
+  });
+}
+
+function nodeHttpsGet(url: string, token: string): Promise<{ status: number; json: unknown }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const req = httpsRequest(
+      {
+        hostname: parsed.hostname,
+        path: parsed.pathname + parsed.search,
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 30_000,
+      },
+      res => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode ?? 0, json: JSON.parse(Buffer.concat(chunks).toString()) }); }
+          catch { resolve({ status: res.statusCode ?? 0, json: {} }); }
+        });
+      },
+    );
+    req.on('timeout', () => { req.destroy(); reject(new Error('Apify poll timeout')); });
+    req.on('error', reject);
+    req.end();
+  });
+}
 
 // ─── Instagram scraper ────────────────────────────────────────────────────────
 //
@@ -168,6 +233,9 @@ function postToMoment(post: InstagramPost, imageUrl: string | undefined): Moment
 
   const ts = getTimestamp(post);
 
+  const ownerHandle = post.ownerUsername ?? '';
+  const postHashtags = (post.hashtags ?? []).slice(0, 3);
+
   return classifyTrend({
     name: (caption || `@${owner} on Instagram`).slice(0, 100),
     description,
@@ -177,6 +245,10 @@ function postToMoment(post: InstagramPost, imageUrl: string | undefined): Moment
     originDate: typeof ts === 'number'
       ? new Date(ts > 1e10 ? ts : ts * 1000).toISOString()
       : (ts as string | undefined),
+    sourceAccounts: [
+      ...(ownerHandle ? [{ name: `@${ownerHandle}`, url: `https://www.instagram.com/${ownerHandle}/` }] : []),
+      ...postHashtags.map(h => ({ name: `#${toHashtag(h)}`, url: `https://www.instagram.com/explore/tags/${toHashtag(h)}/` })),
+    ],
   });
 }
 
@@ -274,9 +346,9 @@ async function fetchInstagramViaWebAPI(hashtags: string[]): Promise<InstagramPos
       const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
 
       if (!res.ok) {
-        // 401/403 = auth required (Instagram tightening) — stop trying further tags
-        if (res.status === 401 || res.status === 403) {
-          console.warn(`[Instagram] Mobile API requires auth (${res.status}) — skipping`);
+        // 400/401/403/429 = Instagram blocking unauthenticated access — stop all further tries
+        if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 429) {
+          console.warn(`[Instagram] Mobile API blocked (${res.status}) — skipping all hashtags`);
           break;
         }
         console.warn(`[Instagram] Mobile API ${tag}: ${res.status}`);
@@ -321,25 +393,20 @@ async function runInstagramScraper(
 
   console.log(`[Instagram] ${label}: starting async run (budget reserved: $${reservation.reservedUsd.toFixed(3)})...`);
 
-  // Use async run + polling instead of run-sync (sync drops connection after ~2 min)
+  // Use node:https (not global fetch) to avoid undici's 10-second TCP connect timeout.
   let runId: string;
   try {
-    const startRes = await fetch(
-      `${APIFY_BASE}/acts/apify~instagram-scraper/runs?token=${token}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...input, maxRequestRetries: 2 }),
-        signal: AbortSignal.timeout(30_000),
-      },
+    const { status: httpStatus, json: startData } = await nodeHttpsPost(
+      `${APIFY_BASE}/acts/apify~instagram-scraper/runs`,
+      token,
+      { ...input, maxRequestRetries: 2 },
     );
-    if (!startRes.ok) {
-      console.error(`[Instagram] ${label} start error ${startRes.status}`);
+    if (httpStatus < 200 || httpStatus >= 300) {
+      console.error(`[Instagram] ${label} start error ${httpStatus}`);
       await releaseReservation(reservation);
       return [];
     }
-    const startData = await startRes.json() as { data?: { id?: string } };
-    runId = startData.data?.id ?? '';
+    runId = (startData as { data?: { id?: string } }).data?.id ?? '';
     if (!runId) {
       console.error(`[Instagram] ${label}: no run ID returned`);
       await releaseReservation(reservation);
@@ -358,15 +425,9 @@ async function runInstagramScraper(
   while (Date.now() < deadline && (status === 'RUNNING' || status === 'READY')) {
     await new Promise(r => setTimeout(r, 10_000));
     try {
-      const statusRes = await fetch(
-        `${APIFY_BASE}/actor-runs/${runId}?token=${token}`,
-        { signal: AbortSignal.timeout(10_000) },
-      );
-      if (statusRes.ok) {
-        const statusData = await statusRes.json() as { data?: { status?: string } };
-        status = statusData.data?.status ?? 'RUNNING';
-        console.log(`[Instagram] ${label}: run status = ${status}`);
-      }
+      const { json: statusData } = await nodeHttpsGet(`${APIFY_BASE}/actor-runs/${runId}`, token);
+      status = (statusData as { data?: { status?: string } }).data?.status ?? 'RUNNING';
+      console.log(`[Instagram] ${label}: run status = ${status}`);
     } catch { /* network hiccup — retry next poll */ }
   }
 
@@ -379,16 +440,16 @@ async function runInstagramScraper(
   // Fetch dataset results
   let posts: InstagramPost[] = [];
   try {
-    const dataRes = await fetch(
-      `${APIFY_BASE}/actor-runs/${runId}/dataset/items?token=${token}&format=json&limit=${reservation.safeLimit}`,
-      { signal: AbortSignal.timeout(30_000) },
+    const { status: dataStatus, json: dataJson } = await nodeHttpsGet(
+      `${APIFY_BASE}/actor-runs/${runId}/dataset/items?format=json&limit=${reservation.safeLimit}`,
+      token,
     );
-    if (!dataRes.ok) {
-      console.error(`[Instagram] ${label} dataset fetch error ${dataRes.status}`);
+    if (dataStatus < 200 || dataStatus >= 300) {
+      console.error(`[Instagram] ${label} dataset fetch error ${dataStatus}`);
       await releaseReservation(reservation);
       return [];
     }
-    posts = (await dataRes.json()) as InstagramPost[];
+    posts = dataJson as InstagramPost[];
   } catch (e) {
     console.error(`[Instagram] ${label} dataset fetch failed:`, e);
     await releaseReservation(reservation);

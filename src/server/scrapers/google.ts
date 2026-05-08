@@ -10,9 +10,19 @@ import { fetchTopicImage } from './image-utils';
 const APIFY_BASE = 'https://api.apify.com/v2';
 const TRENDS_RSS_BASE = 'https://trends.google.com/trending/rss';
 
-const GEO_TARGETS = [
-  { geo: 'IN', label: 'India' },
-  { geo: 'US', label: 'Global' },
+// Google Trends RSS category codes:
+//   (none) = Top trending   e = Entertainment   s = Sports
+//   b = Business            t = Sci/Tech         h = Health
+// Each feed returns ~20 items independently — combining them gets ~120+ unique trends.
+const RSS_FEEDS: Array<{ geo: string; cat?: string; label: string }> = [
+  { geo: 'IN',             label: 'India Top'          },
+  { geo: 'IN', cat: 'e',  label: 'India Entertainment' },
+  { geo: 'IN', cat: 's',  label: 'India Sports'        },
+  { geo: 'IN', cat: 'b',  label: 'India Business'      },
+  { geo: 'IN', cat: 't',  label: 'India Tech'          },
+  { geo: 'IN', cat: 'h',  label: 'India Health'        },
+  { geo: 'US',             label: 'Global Top'          },
+  { geo: 'US', cat: 'e',  label: 'Global Entertainment'},
 ];
 
 // ─── RSS helpers (shared between primary + fallback) ─────────────────────────
@@ -58,9 +68,10 @@ function parseTrafficToScore(traffic: string): number {
   return 62;
 }
 
-async function fetchGoogleTrendsRSS(geo: string): Promise<GoogleTrendRSSItem[]> {
+async function fetchGoogleTrendsRSS(geo: string, cat?: string): Promise<GoogleTrendRSSItem[]> {
+  const qs = cat ? `?geo=${geo}&cat=${cat}` : `?geo=${geo}`;
   try {
-    const res = await fetch(`${TRENDS_RSS_BASE}?geo=${geo}`, {
+    const res = await fetch(`${TRENDS_RSS_BASE}${qs}`, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; MomentMarketing/2.0)',
         Accept: 'application/rss+xml, application/xml, text/xml',
@@ -122,7 +133,7 @@ interface ApifyGoogleTrendItem {
 }
 
 async function fetchViaApify(token: string): Promise<Moment[]> {
-  const reservation = await reserveCall('emastra/google-trends-scraper', 50, 10);
+  const reservation = await reserveCall('emastra/google-trends-scraper', 100, 10);
   if (!reservation) {
     console.warn('[Google] Apify budget exhausted — using RSS fallback');
     return [];
@@ -199,12 +210,17 @@ async function fetchViaApify(token: string): Promise<Moment[]> {
         ? `${headline.slice(0, 120)}${headline.length > 120 ? '…' : ''}${source ? ` — ${source}` : ''}${trafficLabel}`
         : `Trending on Google India${trafficLabel}${sourceLabel}`;
 
+      const articleUrl = item.articles?.[0]?.url;
       return classifyTrend({
         name: (item.title ?? 'Google Trending').slice(0, 100),
         description,
         imageUrl: imageUrls[idx],
         trendingScore: score,
         platform: 'Google',
+        sourceAccounts: [
+          { name: `Google Trends India`, url: `https://trends.google.com/trends/explore?q=${encodeURIComponent(item.title ?? '')}&geo=IN` },
+          ...(source ? [{ name: source, url: articleUrl ?? `https://news.google.com/search?q=${encodeURIComponent(item.title ?? '')}` }] : []),
+        ],
       });
     })
     .filter((m): m is NonNullable<typeof m> => m !== null);
@@ -213,24 +229,25 @@ async function fetchViaApify(token: string): Promise<Moment[]> {
 // ─── RSS fallback ─────────────────────────────────────────────────────────────
 
 async function fetchViaRSS(): Promise<Moment[]> {
-  console.log('[Google] Using RSS fallback (free)...');
+  console.log(`[Google] RSS — fetching ${RSS_FEEDS.length} category feeds in parallel...`);
 
-  const [indiaItems, usItems] = await Promise.all([
-    fetchGoogleTrendsRSS('IN'),
-    fetchGoogleTrendsRSS('US'),
-  ]);
+  // Fetch all feeds simultaneously
+  const feedResults = await Promise.all(
+    RSS_FEEDS.map(async f => {
+      const items = await fetchGoogleTrendsRSS(f.geo, f.cat);
+      console.log(`[Google] RSS ${f.label} → ${items.length} items`);
+      return items.map(i => ({ ...i, geo: f.geo, label: f.label }));
+    }),
+  );
 
-  const allItems: (GoogleTrendRSSItem & { geo: string })[] = [
-    ...indiaItems.map(i => ({ ...i, geo: 'IN' })),
-    ...usItems.map(i => ({ ...i, geo: 'US' })),
-  ];
+  const allItems = feedResults.flat();
 
   if (allItems.length === 0) {
-    console.warn('[Google] RSS returned no items');
+    console.warn('[Google] RSS returned no items from any feed');
     return [];
   }
 
-  // Dedupe by title
+  // Dedupe by title across all feeds — India feeds take priority over Global
   const seen = new Set<string>();
   const unique = allItems.filter(item => {
     const key = item.title.toLowerCase().trim();
@@ -239,9 +256,7 @@ async function fetchViaRSS(): Promise<Moment[]> {
     return true;
   });
 
-  console.log(
-    `[Google] RSS → ${unique.length} trending searches (IN: ${indiaItems.length}, US: ${usItems.length})`,
-  );
+  console.log(`[Google] RSS total: ${unique.length} unique trends from ${allItems.length} raw items`);
 
   // Resolve images in parallel — use RSS embedded image first, then fetchTopicImage
   const imageUrls: Array<string | undefined> = [];
@@ -262,7 +277,8 @@ async function fetchViaRSS(): Promise<Moment[]> {
       const score = parseTrafficToScore(item.traffic);
       const source = item.newsSource ? ` • Source: ${item.newsSource}` : '';
       const traffic = item.traffic ? ` • ${item.traffic} searches` : '';
-      const geoLabel = item.geo === 'IN' ? 'India' : 'Global';
+      const isIndia = item.geo === 'IN';
+      const geoLabel = isIndia ? 'India' : 'Global';
 
       return classifyTrend({
         name: item.title,
@@ -270,6 +286,10 @@ async function fetchViaRSS(): Promise<Moment[]> {
         imageUrl: imageUrls[idx],
         trendingScore: score,
         platform: 'Google',
+        sourceAccounts: [
+          { name: `Google Trends ${geoLabel}`, url: `https://trends.google.com/trends/explore?q=${encodeURIComponent(item.title)}&geo=${item.geo}` },
+          ...(item.newsSource ? [{ name: item.newsSource, url: `https://news.google.com/search?q=${encodeURIComponent(item.title)}` }] : []),
+        ],
       });
     })
     .filter((m): m is NonNullable<typeof m> => m !== null);
